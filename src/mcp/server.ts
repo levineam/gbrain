@@ -7,10 +7,11 @@ import { expandQuery } from '../core/search/expansion.ts';
 import { chunkText } from '../core/chunkers/recursive.ts';
 import { embedBatch } from '../core/embedding.ts';
 import type { ChunkInput } from '../core/types.ts';
+import { VERSION } from '../version.ts';
 
 export async function startMcpServer(engine: BrainEngine) {
   const server = new Server(
-    { name: 'gbrain', version: '0.1.0' },
+    { name: 'gbrain', version: VERSION },
     { capabilities: { tools: {} } },
   );
 
@@ -189,6 +190,17 @@ export async function handleToolCall(
       return { status: 'reverted' };
     }
 
+    case 'sync_brain': {
+      const { performSync } = await import('../commands/sync.ts');
+      return performSync(engine, {
+        repoPath: params.repo as string | undefined,
+        dryRun: (params.dry_run as boolean) || false,
+        noEmbed: false,
+        noPull: false,
+        full: false,
+      });
+    }
+
     default:
       throw new Error(`Unknown tool: ${tool}`);
   }
@@ -216,5 +228,6 @@ function getToolDefinitions() {
     { name: 'get_health', description: 'Brain health dashboard (embed coverage, stale pages, orphans)', inputSchema: { type: 'object', properties: {} } },
     { name: 'get_versions', description: 'Page version history', inputSchema: { type: 'object', properties: { slug: { type: 'string' } }, required: ['slug'] } },
     { name: 'revert_version', description: 'Revert page to a previous version', inputSchema: { type: 'object', properties: { slug: { type: 'string' }, version_id: { type: 'number' } }, required: ['slug', 'version_id'] } },
+    { name: 'sync_brain', description: 'Sync git repo to brain (incremental)', inputSchema: { type: 'object', properties: { repo: { type: 'string', description: 'Path to git repo (optional if configured)' }, dry_run: { type: 'boolean', description: 'Preview changes without applying' } } } },
   ];
 }

@@ -1,11 +1,8 @@
-import { readFileSync, readdirSync, statSync } from 'fs';
+import { readdirSync, statSync, existsSync } from 'fs';
+import { execFileSync } from 'child_process';
 import { join, relative } from 'path';
-import { createHash } from 'crypto';
 import type { BrainEngine } from '../core/engine.ts';
-import { parseMarkdown } from '../core/markdown.ts';
-import { chunkText } from '../core/chunkers/recursive.ts';
-import { embed, embedBatch } from '../core/embedding.ts';
-import type { ChunkInput } from '../core/types.ts';
+import { importFile } from '../core/import-file.ts';
 
 export async function runImport(engine: BrainEngine, args: string[]) {
   const dir = args.find(a => !a.startsWith('--'));
@@ -23,6 +20,7 @@ export async function runImport(engine: BrainEngine, args: string[]) {
   let imported = 0;
   let skipped = 0;
   let chunksCreated = 0;
+  const importedSlugs: string[] = [];
 
   for (let i = 0; i < files.length; i++) {
     const filePath = files[i];
@@ -34,79 +32,14 @@ export async function runImport(engine: BrainEngine, args: string[]) {
     }
 
     try {
-      const content = readFileSync(filePath, 'utf-8');
-      const parsed = parseMarkdown(content, relativePath);
-      const slug = parsed.slug;
-
-      // Check content hash for idempotency
-      const hash = createHash('sha256')
-        .update(parsed.compiled_truth + '\n---\n' + parsed.timeline)
-        .digest('hex');
-
-      const existing = await engine.getPage(slug);
-      if (existing?.content_hash === hash) {
+      const result = await importFile(engine, filePath, relativePath, { noEmbed });
+      if (result.status === 'imported') {
+        imported++;
+        chunksCreated += result.chunks;
+        importedSlugs.push(result.slug);
+      } else {
         skipped++;
-        continue;
       }
-
-      // Upsert page
-      await engine.putPage(slug, {
-        type: parsed.type,
-        title: parsed.title,
-        compiled_truth: parsed.compiled_truth,
-        timeline: parsed.timeline,
-        frontmatter: parsed.frontmatter,
-      });
-
-      // Tags
-      for (const tag of parsed.tags) {
-        await engine.addTag(slug, tag);
-      }
-
-      // Chunk
-      const chunks: ChunkInput[] = [];
-
-      if (parsed.compiled_truth.trim()) {
-        const ctChunks = chunkText(parsed.compiled_truth);
-        for (const c of ctChunks) {
-          chunks.push({
-            chunk_index: chunks.length,
-            chunk_text: c.text,
-            chunk_source: 'compiled_truth',
-          });
-        }
-      }
-
-      if (parsed.timeline.trim()) {
-        const tlChunks = chunkText(parsed.timeline);
-        for (const c of tlChunks) {
-          chunks.push({
-            chunk_index: chunks.length,
-            chunk_text: c.text,
-            chunk_source: 'timeline',
-          });
-        }
-      }
-
-      // Embed if requested
-      if (!noEmbed && chunks.length > 0) {
-        try {
-          const embeddings = await embedBatch(chunks.map(c => c.chunk_text));
-          for (let j = 0; j < chunks.length; j++) {
-            chunks[j].embedding = embeddings[j];
-            chunks[j].token_count = Math.ceil(chunks[j].chunk_text.length / 4);
-          }
-        } catch {
-          // Embedding failure is non-fatal, chunks still saved without embeddings
-        }
-      }
-
-      if (chunks.length > 0) {
-        await engine.upsertChunks(slug, chunks);
-        chunksCreated += chunks.length;
-      }
-
-      imported++;
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`\n  Warning: skipped ${relativePath}: ${msg}`);
@@ -123,9 +56,21 @@ export async function runImport(engine: BrainEngine, args: string[]) {
   await engine.logIngest({
     source_type: 'directory',
     source_ref: dir,
-    pages_updated: [],
+    pages_updated: importedSlugs,
     summary: `Imported ${imported} pages, ${skipped} skipped, ${chunksCreated} chunks`,
   });
+
+  // Import → sync continuity: write sync checkpoint if this is a git repo
+  try {
+    if (existsSync(join(dir, '.git'))) {
+      const head = execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim();
+      await engine.setConfig('sync.last_commit', head);
+      await engine.setConfig('sync.last_run', new Date().toISOString());
+      await engine.setConfig('sync.repo_path', dir);
+    }
+  } catch {
+    // Not a git repo or git not available, skip checkpoint
+  }
 }
 
 function collectMarkdownFiles(dir: string): string[] {

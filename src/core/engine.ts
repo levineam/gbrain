@@ -67,6 +67,10 @@ export interface BrainEngine {
   logIngest(entry: IngestLogInput): Promise<void>;
   getIngestLog(opts?: { limit?: number }): Promise<IngestLogEntry[]>;
 
+  // Sync
+  updateSlug(oldSlug: string, newSlug: string): Promise<void>;
+  rewriteLinks(oldSlug: string, newSlug: string): Promise<void>;
+
   // Config
   getConfig(key: string): Promise<string | null>;
   setConfig(key: string, value: string): Promise<void>;

@@ -142,6 +142,26 @@ INSERT INTO config (key, value) VALUES
 ON CONFLICT (key) DO NOTHING;
 
 -- ============================================================
+-- files: binary attachments stored in Supabase Storage
+-- ============================================================
+CREATE TABLE IF NOT EXISTS files (
+  id           SERIAL PRIMARY KEY,
+  page_slug    TEXT   REFERENCES pages(slug) ON DELETE SET NULL ON UPDATE CASCADE,
+  filename     TEXT   NOT NULL,
+  storage_path TEXT   NOT NULL,
+  storage_url  TEXT   NOT NULL,
+  mime_type    TEXT,
+  size_bytes   BIGINT,
+  content_hash TEXT   NOT NULL,
+  metadata     JSONB  NOT NULL DEFAULT '{}',
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(storage_path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_files_page ON files(page_slug);
+CREATE INDEX IF NOT EXISTS idx_files_hash ON files(content_hash);
+
+-- ============================================================
 -- Trigger-based search_vector (spans pages + timeline_entries)
 -- ============================================================
 ALTER TABLE pages ADD COLUMN IF NOT EXISTS search_vector tsvector;

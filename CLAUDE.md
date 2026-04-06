@@ -14,11 +14,13 @@ use the tools — ingest meetings, answer queries, maintain the brain, enrich fr
 - `src/core/engine.ts` — Pluggable engine interface (BrainEngine)
 - `src/core/postgres-engine.ts` — Postgres + pgvector implementation
 - `src/core/db.ts` — Connection management, schema initialization
+- `src/core/import-file.ts` — Shared single-file import (used by import + sync)
+- `src/core/sync.ts` — Pure sync functions (manifest parsing, filtering, slug conversion)
 - `src/core/chunkers/` — 3-tier chunking (recursive, semantic, LLM-guided)
 - `src/core/search/` — Hybrid search: vector + keyword + RRF + multi-query expansion + dedup
 - `src/core/embedding.ts` — OpenAI text-embedding-3-large, batch, retry, backoff
 - `src/mcp/server.ts` — MCP stdio server exposing all tools
-- `src/schema.sql` — Full Postgres + pgvector DDL
+- `src/schema.sql` — Full Postgres + pgvector DDL (includes files table)
 
 ## Commands
 
@@ -26,15 +28,17 @@ Run `gbrain --help` or `gbrain --tools-json` for full command reference.
 
 ## Testing
 
-`bun test` runs all tests. Tests: `test/markdown.test.ts` (frontmatter parsing,
-round-trip serialization), `test/chunkers/recursive.test.ts` (delimiter splitting,
-overlap, chunk sizing). Future: `test/import.test.ts` for full import/export round-trip.
+`bun test` runs all tests (39 tests across 3 files). Tests: `test/markdown.test.ts`
+(frontmatter parsing, round-trip serialization), `test/chunkers/recursive.test.ts`
+(delimiter splitting, overlap, chunk sizing), `test/sync.test.ts` (manifest parsing,
+isSyncable filtering, pathToSlug conversion).
 
 ## Skills
 
 Read the skill files in `skills/` before doing brain operations. They contain the
-workflows, heuristics, and quality rules for ingestion, querying, maintenance, and
-enrichment.
+workflows, heuristics, and quality rules for ingestion, querying, maintenance,
+enrichment, and installation. 7 skills: ingest, query, maintain, enrich, briefing,
+migrate, install.
 
 ## Build
 

@@ -45,13 +45,13 @@ export async function runInit(args: string[]) {
 async function supabaseWizard(): Promise<string> {
   // Try Supabase CLI auto-provision
   try {
-    execSync('npx supabase --version', { stdio: 'pipe' });
+    execSync('bunx supabase --version', { stdio: 'pipe' });
     console.log('Supabase CLI detected.');
-    console.log('To auto-provision, run: npx supabase login && npx supabase projects create');
+    console.log('To auto-provision, run: bunx supabase login && bunx supabase projects create');
     console.log('Then use: gbrain init --url <your-connection-string>');
   } catch {
     console.log('Supabase CLI not found.');
-    console.log('Install it: npm install -g supabase');
+    console.log('Install it: bun add -g supabase');
     console.log('Or provide a connection URL directly.');
   }
 

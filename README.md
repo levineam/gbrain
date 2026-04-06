@@ -96,7 +96,7 @@ You: "Install gbrain and set up my knowledge brain.
       4. Read the skill files in skills/ so you know how to use the brain"
 ```
 
-OpenClaw will install the package, walk through the Supabase connection wizard, import demo data, and learn the 6 brain skills (ingest, query, maintain, enrich, briefing, migrate).
+OpenClaw will install the package, walk through the Supabase connection wizard, import demo data, and learn the 7 brain skills (ingest, query, maintain, enrich, briefing, migrate, install).
 
 After setup, you talk to your brain through OpenClaw:
 
@@ -109,18 +109,20 @@ You: "Import my Obsidian vault into the brain"
 
 OpenClaw reads the skill files in `skills/`, figures out which gbrain commands to run, and does the work. You never touch the CLI directly unless you want to.
 
+GBrain keeps your brain current automatically. After setup, `gbrain sync --watch` polls your git repo and imports only what changed. Binary files (images, PDFs, audio) can be moved to Supabase Storage with `gbrain files sync` to slim down your git repo.
+
 ### With ClawHub
 
 ```bash
 clawhub install gbrain
 ```
 
-This installs the npm package, copies the skill files, and runs `gbrain init --supabase` on first use.
+This installs the package, copies the skill files, and runs `gbrain init --supabase` on first use.
 
 ### Standalone CLI
 
 ```bash
-npm install -g gbrain
+bun add -g gbrain
 ```
 
 ### As a library
@@ -134,6 +136,23 @@ import { PostgresEngine } from 'gbrain';
 ```
 
 All paths require a Postgres database with pgvector. Supabase Pro ($25/mo) is the recommended zero-ops option.
+
+## Upgrade
+
+Upgrade depends on how you installed:
+
+```bash
+# Installed via bun (standalone or library)
+bun update gbrain
+
+# Installed via ClawHub
+clawhub update gbrain
+
+# Compiled binary
+# Download the latest from https://github.com/garrytan/gbrain/releases
+```
+
+After upgrading, run `gbrain init` again to apply any schema migrations (idempotent, safe to re-run).
 
 ## Setup
 
@@ -269,9 +288,13 @@ page_versions            Snapshot history for compiled_truth
 raw_data                 Sidecar JSON from external APIs
   page_id, source, data (JSONB)
 
+files                    Binary attachments in Supabase Storage
+  page_slug (FK)         Links to pages (ON UPDATE CASCADE)
+  storage_path, storage_url, content_hash, mime_type, metadata (JSONB)
+
 ingest_log               Audit trail of import/ingest operations
 
-config                   Brain-level settings (embedding model, chunk strategy)
+config                   Brain-level settings (embedding model, chunk strategy, sync state)
 ```
 
 Indexes: B-tree on slug/type, GIN on frontmatter/search_vector, HNSW on embeddings, pg_trgm on title for fuzzy slug resolution.
@@ -305,7 +328,14 @@ SEARCH
 
 IMPORT/EXPORT
   gbrain import <dir> [--no-embed]          Import markdown directory (idempotent)
+  gbrain sync [--repo <path>] [flags]       Git-to-brain incremental sync
   gbrain export [--dir ./out/]              Export to markdown (round-trip)
+
+FILES
+  gbrain files list [slug]                  List stored files
+  gbrain files upload <file> --page <slug>  Upload file to storage
+  gbrain files sync <dir>                   Bulk upload directory
+  gbrain files verify                       Verify all uploads
 
 EMBEDDINGS
   gbrain embed [<slug>|--all|--stale]       Generate/refresh embeddings
@@ -386,7 +416,7 @@ Add to your Claude Code or Cursor MCP config:
 }
 ```
 
-20 tools: get_page, put_page, delete_page, list_pages, search, query, add_tag, remove_tag, get_tags, add_link, remove_link, get_links, get_backlinks, traverse_graph, add_timeline_entry, get_timeline, get_stats, get_health, get_versions, revert_version.
+21 tools: get_page, put_page, delete_page, list_pages, search, query, add_tag, remove_tag, get_tags, add_link, remove_link, get_links, get_backlinks, traverse_graph, add_timeline_entry, get_timeline, get_stats, get_health, get_versions, revert_version, sync_brain.
 
 Every tool mirrors a CLI command. Drift tests verify identical behavior.
 
@@ -402,6 +432,7 @@ Fat markdown files that tell AI agents HOW to use gbrain. No skill logic in the 
 | **enrich** | Enrich pages from external APIs. Raw data stored separately, distilled highlights go to compiled truth. |
 | **briefing** | Daily briefing: today's meetings with participant context, active deals with deadlines, time-sensitive threads, recent changes. |
 | **migrate** | Universal migration from Obsidian (wikilinks to gbrain links), Notion (stripped UUIDs), Logseq (block refs), plain markdown, CSV, JSON, Roam. |
+| **install** | Set up GBrain from scratch: Supabase setup (magic path via CLI or 2-copy-paste fallback), import, sync cron, optional file migration, agent teaching. |
 
 ## Architecture
 

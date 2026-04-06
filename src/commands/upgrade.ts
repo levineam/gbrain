@@ -1,19 +1,23 @@
 import { execSync } from 'child_process';
 
-export async function runUpgrade(_args: string[]) {
-  // Detect installation method
+export async function runUpgrade(args: string[]) {
+  if (args.includes('--help') || args.includes('-h')) {
+    console.log('Usage: gbrain upgrade\n\nSelf-update the CLI.\n\nDetects install method (bun, binary, clawhub) and runs the appropriate update.');
+    return;
+  }
+
   const method = detectInstallMethod();
 
   console.log(`Detected install method: ${method}`);
 
   switch (method) {
-    case 'npm':
-      console.log('Upgrading via npm...');
+    case 'bun':
+      console.log('Upgrading via bun...');
       try {
-        execSync('bun update gbrain', { stdio: 'inherit' });
+        execSync('bun update gbrain', { stdio: 'inherit', timeout: 120_000 });
         console.log('Upgrade complete.');
       } catch {
-        console.error('npm upgrade failed. Try: bun update gbrain');
+        console.error('Upgrade failed. Try running manually: bun update gbrain');
       }
       break;
 
@@ -26,7 +30,7 @@ export async function runUpgrade(_args: string[]) {
     case 'clawhub':
       console.log('Upgrading via ClawHub...');
       try {
-        execSync('clawhub update gbrain', { stdio: 'inherit' });
+        execSync('clawhub update gbrain', { stdio: 'inherit', timeout: 120_000 });
         console.log('Upgrade complete.');
       } catch {
         console.error('ClawHub upgrade failed. Try: clawhub update gbrain');
@@ -42,25 +46,25 @@ export async function runUpgrade(_args: string[]) {
   }
 }
 
-function detectInstallMethod(): 'npm' | 'binary' | 'clawhub' | 'unknown' {
+function detectInstallMethod(): 'bun' | 'binary' | 'clawhub' | 'unknown' {
   const execPath = process.execPath || '';
 
-  // Check if running from node_modules (npm install)
+  // Check if running from node_modules (bun/npm install)
   if (execPath.includes('node_modules') || process.argv[1]?.includes('node_modules')) {
-    return 'npm';
-  }
-
-  // Check if clawhub is available
-  try {
-    execSync('which clawhub', { stdio: 'pipe' });
-    return 'clawhub';
-  } catch {
-    // not available
+    return 'bun';
   }
 
   // Check if running as compiled binary
   if (execPath.endsWith('/gbrain') || execPath.endsWith('\\gbrain.exe')) {
     return 'binary';
+  }
+
+  // Check if clawhub is available (use --version, not which, to avoid false positives)
+  try {
+    execSync('clawhub --version', { stdio: 'pipe', timeout: 5_000 });
+    return 'clawhub';
+  } catch {
+    // not available
   }
 
   return 'unknown';

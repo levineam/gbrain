@@ -520,6 +520,20 @@ export class PostgresEngine implements BrainEngine {
     return rows as unknown as IngestLogEntry[];
   }
 
+  // Sync
+  async updateSlug(oldSlug: string, newSlug: string): Promise<void> {
+    validateSlug(newSlug);
+    const sql = db.getConnection();
+    await sql`UPDATE pages SET slug = ${newSlug}, updated_at = now() WHERE slug = ${oldSlug}`;
+  }
+
+  async rewriteLinks(_oldSlug: string, _newSlug: string): Promise<void> {
+    // Stub in v0.2. Links table uses integer page_id FKs, which are already
+    // correct after updateSlug (page_id doesn't change, only slug does).
+    // Textual [[wiki-links]] in compiled_truth are NOT rewritten here.
+    // The maintain skill's dead link detector surfaces stale references.
+  }
+
   // Config
   async getConfig(key: string): Promise<string | null> {
     const sql = db.getConnection();

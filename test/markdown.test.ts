@@ -146,3 +146,57 @@ Paul Graham argues that startups should do unscalable things early on.
     expect(reparsed.frontmatter.custom).toBe('value');
   });
 });
+
+describe('parseMarkdown edge cases', () => {
+  test('handles content with multiple --- separators', () => {
+    const md = `---
+type: concept
+title: Test
+---
+
+First section.
+
+---
+
+Timeline part 1.
+
+---
+
+More timeline.`;
+    const parsed = parseMarkdown(md);
+    // Only splits at the FIRST standalone ---
+    expect(parsed.compiled_truth.trim()).toBe('First section.');
+    expect(parsed.timeline).toContain('Timeline part 1.');
+    expect(parsed.timeline).toContain('More timeline.');
+  });
+
+  test('handles frontmatter without type or title', () => {
+    const md = `---
+custom_field: hello
+---
+
+Some content.`;
+    const parsed = parseMarkdown(md);
+    expect(parsed.type).toBeTruthy(); // should have a default
+    expect(parsed.compiled_truth.trim()).toBe('Some content.');
+    expect(parsed.frontmatter.custom_field).toBe('hello');
+  });
+
+  test('handles content with no frontmatter at all', () => {
+    const md = `Just plain text with no YAML.`;
+    const parsed = parseMarkdown(md);
+    expect(parsed.compiled_truth).toContain('Just plain text');
+  });
+
+  test('handles empty string', () => {
+    const parsed = parseMarkdown('');
+    expect(parsed.compiled_truth).toBe('');
+    expect(parsed.timeline).toBe('');
+  });
+
+  test('infers type from various directory paths', () => {
+    expect(parseMarkdown('', 'people/someone.md').type).toBe('person');
+    expect(parseMarkdown('', 'concepts/thing.md').type).toBe('concept');
+    expect(parseMarkdown('', 'companies/acme.md').type).toBe('company');
+  });
+});

@@ -74,4 +74,62 @@ describe('Recursive Text Chunker', () => {
     expect(chunks.length).toBeGreaterThan(1);
     expect(chunks[0].text).toContain('Bonjour');
   });
+
+  test('splits at single newline (line-level) when paragraphs are absent', () => {
+    // Lines without double newlines should still split at single newlines
+    const lines = Array(100).fill('This is a single line of text.').join('\n');
+    const chunks = chunkText(lines, { chunkSize: 20 });
+    expect(chunks.length).toBeGreaterThan(1);
+  });
+
+  test('handles text with only whitespace delimiters (word-level split)', () => {
+    // No sentences, no newlines, just words
+    const words = Array(200).fill('word').join(' ');
+    const chunks = chunkText(words, { chunkSize: 50 });
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk.text.trim().length).toBeGreaterThan(0);
+    }
+  });
+
+  test('handles clause-level delimiters (semicolons, colons, commas)', () => {
+    // Text with clauses but no sentence endings
+    const text = Array(100).fill('clause one; clause two: clause three, clause four').join(' ');
+    const chunks = chunkText(text, { chunkSize: 30 });
+    expect(chunks.length).toBeGreaterThan(1);
+  });
+
+  test('preserves content across chunks (lossless)', () => {
+    const original = 'First paragraph.\n\nSecond paragraph.\n\nThird paragraph.';
+    const chunks = chunkText(original, { chunkSize: 5, chunkOverlap: 0 });
+    // With no overlap, all text should appear in chunks
+    const reconstructed = chunks.map(c => c.text).join(' ');
+    expect(reconstructed).toContain('First paragraph');
+    expect(reconstructed).toContain('Second paragraph');
+    expect(reconstructed).toContain('Third paragraph');
+  });
+
+  test('default options produce reasonable chunks', () => {
+    // Large text with defaults (300 words, 50 overlap)
+    const text = Array(500).fill('This is a test sentence with several words.').join(' ');
+    const chunks = chunkText(text);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      const wordCount = chunk.text.split(/\s+/).length;
+      // Should be roughly 300 words, with 1.5x tolerance
+      expect(wordCount).toBeLessThanOrEqual(500);
+    }
+  });
+
+  test('handles mixed delimiter hierarchy', () => {
+    const text = [
+      'Paragraph one has sentences. And more sentences! Really?',
+      '',
+      'Paragraph two; with clauses: and more, clauses here.',
+      '',
+      'Paragraph three.\nWith line breaks.\nAnd more lines.',
+    ].join('\n');
+    const chunks = chunkText(text, { chunkSize: 10 });
+    expect(chunks.length).toBeGreaterThan(1);
+  });
 });

@@ -2,6 +2,21 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.2.0] - 2026-04-05
+
+### Added
+
+- You can now keep your brain current with `gbrain sync`, which uses git's own diff machinery to process only what changed. No more 30-second full directory walks when 3 files changed.
+- Watch mode (`gbrain sync --watch`) polls for changes and syncs automatically. Set it and forget it.
+- Binary file management with `gbrain files` commands (list, upload, sync, verify). Store images, PDFs, and audio in Supabase Storage instead of clogging your git repo.
+- Install skill (`skills/install/SKILL.md`) that walks you through setup from scratch, including Supabase CLI magic path for zero-copy-paste onboarding.
+- Import and sync now share a checkpoint. Run `gbrain import`, then `gbrain sync`, and it picks up right where import left off. Zero gap.
+- Tag reconciliation on reimport. If you remove a tag from your markdown, it actually gets removed from the database now.
+- `gbrain config show` redacts database passwords so you can safely share your config.
+- `updateSlug` engine method preserves page identity (page_id, chunks, embeddings) across renames. Zero re-embedding cost.
+- `sync_brain` MCP tool returns structured results so agents know exactly what changed.
+- 20 new sync tests (39 total across 3 test files)
+
 ## [0.1.0] - 2026-04-05
 
 ### Added
