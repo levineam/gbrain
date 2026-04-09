@@ -31,7 +31,18 @@ Inconsistent tagging (e.g., "vc" vs "venture-capital", "ai" vs "artificial-intel
 
 ### Embedding freshness
 Chunks without embeddings, or chunks embedded with an old model.
-- Refresh stale embeddings in gbrain
+- For large embedding refreshes (>1000 chunks), use nohup:
+  `nohup gbrain embed refresh > /tmp/gbrain-embed.log 2>&1 &`
+- Then check progress: `tail -1 /tmp/gbrain-embed.log`
+
+### Security (RLS verification)
+Run `gbrain doctor --json` and check the RLS status.
+All tables should show RLS enabled. If not, run `gbrain init` again.
+
+### Schema health
+Check that the schema version is up to date. `gbrain doctor --json` reports
+the current version vs expected. If behind, `gbrain init` runs migrations
+automatically.
 
 ### Open threads
 Timeline items older than 30 days with unresolved action items.
