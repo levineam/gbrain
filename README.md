@@ -96,7 +96,7 @@ The repo is the system of record. GBrain is the retrieval layer. The agent reads
 
 The numbers above aren't theoretical. They come from a real deployment documented in [GBRAIN_SKILLPACK.md](docs/GBRAIN_SKILLPACK.md) — a reference architecture for how a production AI agent uses gbrain as its knowledge backbone.
 
-What's in the skillpack:
+**Read the skillpack.** It's the most important doc in this repo. It tells your agent HOW to use gbrain, not just what commands exist:
 
 - **The brain-agent loop** — the read-write cycle that makes knowledge compound
 - **Entity detection** — spawn on every message, capture people/companies/original ideas
@@ -105,7 +105,7 @@ What's in the skillpack:
 - **Source attribution** — every fact traceable to where it came from
 - **Reference cron schedule** — 20+ recurring jobs that keep the brain alive
 
-It's a pattern book, not a tutorial. "Here's what works, here's why."
+Without the skillpack, your agent has tools but no playbook. With it, the agent knows when to read, when to write, how to enrich, and how to keep the brain alive autonomously. It's a pattern book, not a tutorial. "Here's what works, here's why."
 
 ## How gbrain fits with OpenClaw
 
@@ -225,13 +225,65 @@ GBrain keeps your brain current. After setup, `gbrain sync --watch` polls your g
 > or anon key. Find it: Project Settings > Database > Connection string > URI tab >
 > change dropdown to "Session pooler".
 
-### Standalone CLI
+### GBrain without OpenClaw
+
+GBrain works with any AI agent, any MCP client, or no agent at all. Three paths:
+
+#### Standalone CLI
+
+Install globally and use gbrain from the terminal:
 
 ```bash
 bun add -g github:garrytan/gbrain
+gbrain init --supabase          # guided wizard, connects to your Postgres
+gbrain import ~/git/brain/      # index your markdown
+gbrain query "what do we know about competitive dynamics?"
 ```
 
-### As a library
+The CLI gives you every operation: page CRUD, search, tags, links, timeline, graph traversal, file management, health checks. Run `gbrain --help` for the full list.
+
+#### MCP server (Claude Code, Cursor, Windsurf, etc.)
+
+GBrain exposes 30 MCP tools via stdio. Add this to your MCP client config:
+
+**Claude Code** (`~/.claude/server.json`):
+```json
+{
+  "mcpServers": {
+    "gbrain": {
+      "command": "gbrain",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+**Cursor** (Settings > MCP Servers):
+```json
+{
+  "gbrain": {
+    "command": "gbrain",
+    "args": ["serve"]
+  }
+}
+```
+
+This gives your agent `get_page`, `put_page`, `search`, `query`, `add_link`, `traverse_graph`, `sync_brain`, `file_upload`, and 22 more tools. All generated from the same operation definitions as the CLI.
+
+**The tools are not enough.** Your agent also needs the playbook: read [GBRAIN_SKILLPACK.md](docs/GBRAIN_SKILLPACK.md) and paste the relevant sections into your agent's system prompt or project instructions. The skillpack tells the agent WHEN and HOW to use each tool: read before responding, write after learning, detect entities on every message, back-link everything.
+
+The skill markdown files in `skills/` are standalone instruction sets. Copy them into your agent's context:
+
+| Skill file | What the agent learns |
+|------------|----------------------|
+| `skills/ingest/SKILL.md` | How to import meetings, docs, articles |
+| `skills/query/SKILL.md` | 3-layer search with synthesis and citations |
+| `skills/maintain/SKILL.md` | Periodic health: stale pages, orphans, dead links |
+| `skills/enrich/SKILL.md` | Enrich pages from external APIs |
+| `skills/briefing/SKILL.md` | Daily briefing with meeting prep |
+| `skills/migrate/SKILL.md` | Migrate from Obsidian, Notion, Logseq, etc. |
+
+#### As a TypeScript library
 
 ```bash
 bun add github:garrytan/gbrain
@@ -239,7 +291,27 @@ bun add github:garrytan/gbrain
 
 ```typescript
 import { PostgresEngine } from 'gbrain';
+
+const engine = new PostgresEngine();
+await engine.connect({ database_url: process.env.DATABASE_URL });
+await engine.initSchema();
+
+// Search
+const results = await engine.searchKeyword('startup growth');
+
+// Read
+const page = await engine.getPage('people/pedro-franceschi');
+
+// Write
+await engine.putPage('concepts/superlinear-returns', {
+  type: 'concept',
+  title: 'Superlinear Returns',
+  compiled_truth: 'Paul Graham argues that returns in many fields are superlinear...',
+  timeline: '- 2023-10-01: Published on paulgraham.com',
+});
 ```
+
+The `BrainEngine` interface is pluggable. See `docs/ENGINES.md` for how to add backends.
 
 All paths require a Postgres database with pgvector. Supabase Pro ($25/mo) is the recommended zero-ops option.
 
@@ -296,6 +368,59 @@ gbrain embed --stale
 ```
 
 Import is idempotent. Re-running it skips unchanged files (compared by SHA-256 content hash). Progress bar shows status. ~30s for text import of 7,000 files, ~10-15 min for embedding.
+
+## File storage and migration
+
+Brain repos accumulate binary files: images, PDFs, audio recordings, raw API responses. A repo with 3,000 markdown pages might have 2GB of binaries making `git clone` painful.
+
+GBrain has a three-stage migration lifecycle that moves binaries to cloud storage while preserving every reference:
+
+```
+Local files in git repo
+  │
+  ▼  gbrain files mirror <dir>
+Cloud copy exists, local files untouched
+  │
+  ▼  gbrain files redirect <dir>
+Local files replaced with .redirect breadcrumbs (tiny YAML pointers)
+  │
+  ▼  gbrain files clean <dir>
+Breadcrumbs removed, cloud is the only copy
+```
+
+Every stage is reversible until `clean`:
+
+```bash
+# Stage 1: Copy to cloud (git repo unchanged)
+gbrain files mirror ~/git/brain/attachments/ --dry-run   # preview first
+gbrain files mirror ~/git/brain/attachments/
+
+# Stage 2: Replace local files with breadcrumbs
+gbrain files redirect ~/git/brain/attachments/ --dry-run
+gbrain files redirect ~/git/brain/attachments/
+# Your git repo just dropped from 2GB to 50MB
+
+# Undo: download everything back from cloud
+gbrain files restore ~/git/brain/attachments/
+
+# Stage 3: Remove breadcrumbs (irreversible, cloud is the only copy)
+gbrain files clean ~/git/brain/attachments/ --yes
+```
+
+**Storage backends:** S3-compatible (AWS S3, Cloudflare R2, MinIO), Supabase Storage, or local filesystem. Configured during `gbrain init`.
+
+Additional file commands:
+
+```bash
+gbrain files list [slug]           # list files for a page (or all)
+gbrain files upload <file> --page <slug>  # upload file linked to page
+gbrain files sync <dir>            # bulk upload directory
+gbrain files verify                # verify all uploads match local
+gbrain files status                # show migration status of directories
+gbrain files unmirror <dir>        # remove mirror marker (files stay in cloud)
+```
+
+The file resolver (`src/core/file-resolver.ts`) handles fallback automatically: if a local file is missing, it checks for a `.redirect` breadcrumb, then a `.supabase` marker, and resolves to the cloud URL. Code that references files by path keeps working after migration.
 
 ## The knowledge model
 
@@ -472,59 +597,11 @@ ADMIN
   gbrain --tools-json                       Tool discovery (JSON)
 ```
 
-## Using as a library
+## Library and MCP details
 
-GBrain is library-first. The CLI and MCP server are thin wrappers over the engine.
+See [GBrain without OpenClaw](#gbrain-without-openclaw) above for library usage examples, MCP server config, and skill file loading.
 
-```typescript
-import { PostgresEngine } from 'gbrain';
-
-const engine = new PostgresEngine();
-await engine.connect({ database_url: process.env.DATABASE_URL });
-await engine.initSchema();
-
-// Write a page
-await engine.putPage('concepts/superlinear-returns', {
-  type: 'concept',
-  title: 'Superlinear Returns',
-  compiled_truth: 'Paul Graham argues that returns in many fields are superlinear...',
-  timeline: '- 2023-10-01: Published on paulgraham.com',
-});
-
-// Hybrid search
-const results = await engine.searchKeyword('startup growth');
-
-// Typed links
-await engine.addLink('concepts/superlinear-returns', 'concepts/do-things-that-dont-scale', '', 'references');
-
-// Graph traversal
-const graph = await engine.traverseGraph('concepts/superlinear-returns', 3);
-
-// Health check
-const health = await engine.getHealth();
-// { page_count: 10, embed_coverage: 1.0, stale_pages: 0, orphan_pages: 10 }
-```
-
-The `BrainEngine` interface is pluggable. See `docs/ENGINES.md` for how to add backends.
-
-## MCP server
-
-Add to your Claude Code or Cursor MCP config:
-
-```json
-{
-  "mcpServers": {
-    "gbrain": {
-      "command": "gbrain",
-      "args": ["serve"]
-    }
-  }
-}
-```
-
-30 tools generated from the contract-first `operations.ts`: page CRUD, search, tags, links, timeline, admin, sync, raw data, file management, and more.
-
-Every tool is generated from the same operation definitions as the CLI. Parity tests verify structural identity.
+The `BrainEngine` interface is pluggable. See `docs/ENGINES.md` for how to add backends. 30 MCP tools are generated from the contract-first `operations.ts`. Parity tests verify structural identity between CLI, MCP, and tools-json.
 
 ## Skills
 
@@ -581,7 +658,7 @@ Initial embedding cost: ~$4-5 for 7,500 pages via OpenAI text-embedding-3-large.
 
 ## Docs
 
-- [GBRAIN_SKILLPACK.md](docs/GBRAIN_SKILLPACK.md) -- Reference architecture for production agents: brain-agent loop, entity detection, enrichment pipeline, meeting ingestion, cron schedule
+- **[GBRAIN_SKILLPACK.md](docs/GBRAIN_SKILLPACK.md)** -- **Start here for agents.** Reference architecture for production agents: brain-agent loop, entity detection, enrichment pipeline, meeting ingestion, cron schedule
 - [GBRAIN_RECOMMENDED_SCHEMA.md](docs/GBRAIN_RECOMMENDED_SCHEMA.md) -- The recommended brain schema: MECE directories, compiled truth + timeline, enrichment pipelines, resolver decision tree
 - [GBRAIN_V0.md](docs/GBRAIN_V0.md) -- Full product spec, all architecture decisions, every option considered
 - [ENGINES.md](docs/ENGINES.md) -- Pluggable engine interface, capability matrix, how to add backends
