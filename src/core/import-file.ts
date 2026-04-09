@@ -80,6 +80,7 @@ export async function importFromContent(
       compiled_truth: parsed.compiled_truth,
       timeline: parsed.timeline || '',
       frontmatter: parsed.frontmatter,
+      content_hash: hash,
     });
 
     // Tag reconciliation: remove stale, add current

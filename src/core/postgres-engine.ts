@@ -46,7 +46,7 @@ export class PostgresEngine implements BrainEngine {
   async putPage(slug: string, page: PageInput): Promise<Page> {
     validateSlug(slug);
     const sql = db.getConnection();
-    const hash = contentHash(page.compiled_truth, page.timeline || '');
+    const hash = page.content_hash || contentHash(page.compiled_truth, page.timeline || '');
     const frontmatter = page.frontmatter || {};
 
     const rows = await sql`

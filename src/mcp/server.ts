@@ -50,7 +50,7 @@ export async function startMcpServer(engine: BrainEngine) {
         warn: (msg: string) => process.stderr.write(`[warn] ${msg}\n`),
         error: (msg: string) => process.stderr.write(`[error] ${msg}\n`),
       },
-      dryRun: false,
+      dryRun: !!(params?.dry_run),
     };
 
     try {

@@ -20,6 +20,7 @@ export interface PageInput {
   compiled_truth: string;
   timeline?: string;
   frontmatter?: Record<string, unknown>;
+  content_hash?: string;
 }
 
 export interface PageFilters {
