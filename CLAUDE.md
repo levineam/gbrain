@@ -136,10 +136,18 @@ When the user's request matches an available skill, ALWAYS invoke it using the S
 tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
 The skill has specialized workflows that produce better results than ad-hoc answers.
 
+**NEVER hand-roll ship operations.** Do not manually run git commit + push + gh pr
+create when /ship is available. /ship handles VERSION bump, CHANGELOG, document-release,
+pre-landing review, test coverage audit, and adversarial review. Manually creating a PR
+skips all of these. If the user says "commit and ship", "push and ship", "bisect and
+ship", or any combination that ends with shipping — invoke /ship and let it handle
+everything including the commits. If the branch name contains a version (e.g.
+`v0.5-live-sync`), /ship should use that version for the bump.
+
 Key routing rules:
 - Product ideas, "is this worth building", brainstorming → invoke office-hours
 - Bugs, errors, "why is this broken", 500 errors → invoke investigate
-- Ship, deploy, push, create PR → invoke ship
+- Ship, deploy, push, create PR, "commit and ship", "push and ship" → invoke ship
 - QA, test the site, find bugs → invoke qa
 - Code review, check my diff → invoke review
 - Update docs after shipping → invoke document-release
