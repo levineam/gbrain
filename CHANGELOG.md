@@ -49,6 +49,15 @@ All notable changes to GBrain will be documented in this file.
 - **X-to-Brain gets eyes.** Image OCR, Filtered Stream real-time monitoring,
   6-dimension tweet rating rubric, outbound tweet monitoring, cron staggering.
 
+- **Share brain pages without exposing the brain.** `gbrain publish` generates
+  beautiful, self-contained HTML from any brain page. Strips private data
+  (frontmatter, citations, confirmations, brain links, timeline) automatically.
+  Optional AES-256-GCM password gate with client-side decryption, no server
+  needed. Dark/light mode, mobile-optimized typography. This is the first
+  code+skill pair: deterministic code does the work, the skill tells the agent
+  when and how. See the [Thin Harness, Fat Skills](https://x.com/garrytan/status/2042925773300908103)
+  thread for the architecture philosophy.
+
 ### Changed
 
 - **Supabase Storage** now auto-selects upload method by file size: standard POST
@@ -61,7 +70,10 @@ All notable changes to GBrain will be documented in this file.
   uploaded, source_url, type).
 - **All skills** updated to reference actual `gbrain files` commands instead of
   theoretical patterns.
+- **Publish skill** added to manifest (8th skill). First code+skill pair.
 - Skills version bumped to 0.9.0.
+- 34 new unit tests for publish (content stripping, encryption, password
+  generation, HTML output, citation patterns). Total: 376 pass.
 
 ## [0.8.0] - 2026-04-11
 

@@ -52,6 +52,7 @@ markdown files (tool-agnostic, work with both CLI and plugin contexts).
 - `docs/mcp/` — Per-client setup guides (Claude Desktop, Code, Cowork, Perplexity)
 - `skills/_brain-filing-rules.md` — Cross-cutting brain filing rules (referenced by all brain-writing skills)
 - `skills/migrations/` — Version migration files with feature_pitch YAML frontmatter
+- `src/commands/publish.ts` — Deterministic brain page publisher (code+skill pair, zero LLM calls)
 - `openclaw.plugin.json` — ClawHub bundle plugin manifest
 
 ## Commands
@@ -79,7 +80,8 @@ parity), `test/cli.test.ts` (CLI structure), `test/config.test.ts` (config redac
 `test/yaml-lite.test.ts` (YAML parsing), `test/check-update.test.ts` (version check + update CLI),
 `test/pglite-engine.test.ts` (PGLite engine, all 37 BrainEngine methods),
 `test/utils.test.ts` (shared SQL utilities), `test/engine-factory.test.ts` (engine factory + dynamic imports),
-`test/integrations.test.ts` (recipe parsing, CLI routing, recipe validation).
+`test/integrations.test.ts` (recipe parsing, CLI routing, recipe validation),
+`test/publish.test.ts` (content stripping, encryption, password generation, HTML output).
 
 E2E tests (`test/e2e/`): Run against real Postgres+pgvector. Require `DATABASE_URL`.
 - `bun run test:e2e` runs Tier 1 (mechanical, all operations, no API keys)
