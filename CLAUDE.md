@@ -14,10 +14,16 @@ server are both generated from this single source. Engine factory (`src/core/eng
 dynamically imports the configured engine (`'pglite'` or `'postgres'`). Skills are fat
 markdown files (tool-agnostic, work with both CLI and plugin contexts).
 
+**Trust boundary:** `OperationContext.remote` distinguishes trusted local CLI callers
+(`remote: false` set by `src/cli.ts`) from untrusted agent-facing callers
+(`remote: true` set by `src/mcp/server.ts`). Security-sensitive operations like
+`file_upload` tighten filesystem confinement when `remote=true` and default to
+strict behavior when unset.
+
 ## Key files
 
-- `src/core/operations.ts` — Contract-first operation definitions (the foundation)
-- `src/core/engine.ts` — Pluggable engine interface (BrainEngine)
+- `src/core/operations.ts` — Contract-first operation definitions (the foundation). Also exports upload validators: `validateUploadPath`, `validatePageSlug`, `validateFilename`. `OperationContext.remote` flags untrusted callers.
+- `src/core/engine.ts` — Pluggable engine interface (BrainEngine). `clampSearchLimit(limit, default, cap)` takes an explicit cap so per-operation caps can be tighter than `MAX_SEARCH_LIMIT`.
 - `src/core/engine-factory.ts` — Engine factory with dynamic imports (`'pglite'` | `'postgres'`)
 - `src/core/pglite-engine.ts` — PGLite (embedded Postgres 17.5 via WASM) implementation, all 38 BrainEngine methods
 - `src/core/pglite-schema.ts` — PGLite-specific DDL (pgvector, pg_trgm, triggers)
@@ -43,15 +49,20 @@ markdown files (tool-agnostic, work with both CLI and plugin contexts).
 - `src/core/enrichment-service.ts` — Global enrichment service: entity slug generation, tier auto-escalation, batch throttling
 - `src/core/data-research.ts` — Recipe validation, field extraction (MRR/ARR regex), dedup, tracker parsing, HTML stripping
 - `src/core/minions/` — Minions job queue: BullMQ-inspired, Postgres-native (queue, worker, backoff, types)
-- `src/core/minions/queue.ts` — MinionQueue class (submit, claim, complete, fail, stall detection, parent-child)
-- `src/core/minions/worker.ts` — MinionWorker class (handler registry, lock renewal, graceful shutdown)
+- `src/core/minions/queue.ts` — MinionQueue class (submit, claim, complete, fail, stall detection, parent-child, cascade-kill, attachments, idempotency)
+- `src/core/minions/worker.ts` — MinionWorker class (handler registry, lock renewal, graceful shutdown, timeout safety net)
+- `src/core/minions/attachments.ts` — Attachment validation (path traversal, null byte, oversize, base64, duplicate detection)
 - `src/commands/jobs.ts` — `gbrain jobs` CLI subcommands + `gbrain jobs work` daemon
+- `src/commands/extract.ts` — `gbrain extract links|timeline|all`: batch link/timeline extraction from markdown
+- `src/commands/features.ts` — `gbrain features --json --auto-fix`: usage scan + feature adoption salesman
+- `src/commands/autopilot.ts` — `gbrain autopilot --install`: self-maintaining brain daemon (sync+extract+embed)
 - `src/mcp/server.ts` — MCP stdio server (generated from operations)
 - `src/commands/auth.ts` — Standalone token management (create/list/revoke/test)
-- `src/commands/upgrade.ts` — Self-update CLI with post-upgrade feature discovery
+- `src/commands/upgrade.ts` — Self-update CLI with post-upgrade feature discovery + features hook
 - `src/core/schema-embedded.ts` — AUTO-GENERATED from schema.sql (run `bun run build:schema`)
 - `src/schema.sql` — Full Postgres + pgvector DDL (source of truth, generates schema-embedded.ts)
-- `src/commands/integrations.ts` — Standalone integration recipe management (no DB needed)
+- `src/commands/integrations.ts` — Standalone integration recipe management (no DB needed). Exports `getRecipeDirs()` (trust-tagged recipe sources), SSRF helpers (`isInternalUrl`, `parseOctet`, `hostnameToOctets`, `isPrivateIpv4`). Only package-bundled recipes are `embedded=true`; `$GBRAIN_RECIPES_DIR` and cwd `./recipes/` are untrusted and cannot run `command`/`http`/string health checks.
+- `src/core/search/expansion.ts` — Multi-query expansion via Haiku. Exports `sanitizeQueryForPrompt` + `sanitizeExpansionOutput` (prompt-injection defense-in-depth). Sanitized query is only used for the LLM channel; original query still drives search.
 - `recipes/` — Integration recipe files (YAML frontmatter + markdown setup instructions)
 - `docs/guides/` — Individual SKILLPACK guides (broken out from monolith)
 - `docs/integrations/` — "Getting Data In" guides and integration docs
@@ -115,7 +126,7 @@ Key commands added for Minions (job queue):
 
 ## Testing
 
-`bun test` runs all tests (45 unit test files + 5 E2E test files). Unit tests run
+`bun test` runs all tests (48 unit test files + 8 E2E test files). Unit tests run
 without a database. E2E tests skip gracefully when `DATABASE_URL` is not set.
 
 Unit tests: `test/markdown.test.ts` (frontmatter parsing), `test/chunkers/recursive.test.ts`
@@ -147,7 +158,12 @@ parity), `test/cli.test.ts` (CLI structure), `test/config.test.ts` (config redac
 `test/transcription.test.ts` (provider detection, format validation, API key errors),
 `test/enrichment-service.test.ts` (entity slugification, extraction, tier escalation),
 `test/data-research.test.ts` (recipe validation, MRR/ARR extraction, dedup, tracker parsing, HTML stripping),
-`test/minions.test.ts` (Minions job queue: CRUD, state machine, backoff, stall detection, dependencies, worker lifecycle, lock management, claim mechanics).
+`test/minions.test.ts` (Minions job queue v7: CRUD, state machine, backoff, stall detection, dependencies, worker lifecycle, lock management, claim mechanics, depth/child-cap, timeouts, cascade kill, idempotency, child_done inbox, attachments, removeOnComplete/Fail),
+`test/extract.test.ts` (link extraction, timeline extraction, frontmatter parsing, directory type inference),
+`test/features.test.ts` (feature scanning, brain_score calculation, CLI routing, persistence),
+`test/file-upload-security.test.ts` (symlink traversal, cwd confinement, slug + filename allowlists, remote vs local trust),
+`test/query-sanitization.test.ts` (prompt-injection stripping, output sanitization, structural boundary),
+`test/search-limit.test.ts` (clampSearchLimit default/cap behavior across list_pages and get_ingest_log).
 
 E2E tests (`test/e2e/`): Run against real Postgres+pgvector. Require `DATABASE_URL`.
 - `bun run test:e2e` runs Tier 1 (mechanical, all operations, no API keys)
