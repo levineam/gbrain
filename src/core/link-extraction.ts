@@ -129,10 +129,14 @@ export function extractPageLinks(
   // 1. Markdown entity refs.
   for (const ref of extractEntityRefs(content)) {
     const idx = content.indexOf(ref.name);
-    const context = idx >= 0 ? excerpt(content, idx, 80) : ref.name;
+    // Wider context window (240 chars vs original 80) catches verbs that
+    // appear at sentence-or-paragraph distance from the slug — common in
+    // narrative prose where a partner's investment verbs appear once and
+    // then portfolio companies are listed in subsequent sentences.
+    const context = idx >= 0 ? excerpt(content, idx, 240) : ref.name;
     candidates.push({
       targetSlug: ref.slug,
-      linkType: inferLinkType(pageType, context),
+      linkType: inferLinkType(pageType, context, content, ref.slug),
       context,
     });
   }
@@ -147,10 +151,10 @@ export function extractPageLinks(
     // Skip matches that are part of a markdown link (already handled above).
     const charBefore = m.index > 0 ? strippedContent[m.index - 1] : '';
     if (charBefore === '/' || charBefore === '(') continue;
-    const context = excerpt(strippedContent, m.index, 80);
+    const context = excerpt(strippedContent, m.index, 240);
     candidates.push({
       targetSlug: m[1],
-      linkType: inferLinkType(pageType, context),
+      linkType: inferLinkType(pageType, context, content, m[1]),
       context,
     });
   }
@@ -188,41 +192,77 @@ function excerpt(s: string, idx: number, width: number): string {
 
 // ─── Relationship type inference (deterministic, zero LLM) ──────
 
-// Match phrases that strongly indicate employment, not bare nouns.
-// "founder" alone is too loose — matches "frank-founder" slugs etc.
-// Require employment context: position + at/of, or explicit work verbs.
-const WORKS_AT_RE = /\b(?:CEO of|CTO of|COO of|CFO of|VP at|VP of|works at|worked at|working at|employed by|joined as|engineer at|engineer for|director at|director of|head of)\b/i;
-const INVESTED_RE = /\b(?:invested in|invested|backed by|funding from|led by|participated in|wrote a check)\b/i;
-const FOUNDED_RE = /\b(?:founded|co-?founded)\b/i;
-const ADVISES_RE = /\b(?:advises|advisor to|board member|on the board|sits on the board)\b/i;
+// ─── Type-inference patterns ────────────────────────────────────
+//
+// Calibrated against the BrainBench rich-prose corpus (240 pages of
+// LLM-generated narrative). The templated 80-page benchmark hit 94.4% type
+// accuracy, but rich prose dropped to 70.7% before this round of tuning —
+// LLMs use far more verb forms than the original regexes covered.
+//
+// Key issues fixed:
+//   - INVESTED_RE missed "led the seed", "led the Series A", "early investor",
+//     "invests in" (present), "investing in" (gerund), "portfolio company".
+//   - ADVISES_RE matched generic "board member" / "sits on the board" which
+//     also describes investors holding board seats. Tightened to require
+//     explicit "advisor"/"advise" rooting.
+
+// Employment context: position + at/of, or explicit work verbs.
+const WORKS_AT_RE = /\b(?:CEO of|CTO of|COO of|CFO of|CMO of|CRO of|VP at|VP of|VPs? Engineering|VPs? Product|works at|worked at|working at|employed by|employed at|joined as|joined the team|engineer at|engineer for|director at|director of|head of|leads engineering|leads product|currently at|previously at|previously worked at|spent .* (?:years|months) at|stint at|tenure at)\b/i;
+
+// Investment context. Order patterns from most-specific to least to keep
+// regex efficient. Includes funding-round verbs ("led the seed", "led X's
+// Series A"), narrative verbs ("invests in", "investing in"), historical
+// ("early investor in", "first check"), and portfolio framing ("portfolio
+// company", "portfolio includes").
+const INVESTED_RE = /\b(?:invested in|invests in|investing in|invest in|investment in|investments in|backed by|funding from|funded by|raised from|led the (?:seed|Series|round|investment|round)|led .{0,30}(?:Series [A-Z]|seed|round|investment)|participated in (?:the )?(?:seed|Series|round)|wrote (?:a |the )?check|first check|early investor|portfolio (?:company|includes)|board seat (?:at|in|on)|term sheet for)\b/i;
+
+const FOUNDED_RE = /\b(?:founded|co-?founded|started the company|incorporated)\b/i;
+
+// Advise context: must be rooted in "advisor"/"advise" (investors also sit on
+// boards). Keep "board advisor" / "advisory board" but drop generic "board
+// member" / "sits on the board" which over-matches.
+const ADVISES_RE = /\b(?:advises|advised|advisor (?:to|at|for|of)|advisory (?:board|role|position)|board advisor|on .{0,20} advisory board|joined .{0,20} advisory board)\b/i;
+
+// Page-role detection: if the source page describes a partner/investor at
+// page level, that's a strong prior for outbound company refs being
+// invested_in even when per-edge context lacks explicit investment verbs.
+const PARTNER_ROLE_RE = /\b(?:partner at|partner of|venture partner|VC partner|invested early|investor at|investor in|portfolio|venture capital|early-stage investor|seed investor|fund [A-Z]|invests across|backs companies)\b/i;
+const ADVISOR_ROLE_RE = /\b(?:full-time advisor|professional advisor|advises (?:multiple|several|various))\b/i;
 
 /**
  * Infer link_type from page context. Deterministic regex heuristics, no LLM.
  *
- * Precedence (most specific first):
- *   1. Frontmatter source -> 'source' (handled in extractPageLinks; never here).
- *   2. Meeting page referencing any entity -> 'attended'.
- *   3. Founded > advises > invested_in > works_at (strongest verbs first).
- *   4. Default 'mentions'.
+ * Two layers of inference:
+ *   1. Per-edge: ~240 char window around the slug mention. Looks for explicit
+ *      verbs (FOUNDED_RE, INVESTED_RE, ADVISES_RE, WORKS_AT_RE).
+ *   2. Page-role prior: when per-edge inference falls through to 'mentions',
+ *      check if the SOURCE page describes the author as a partner/investor.
+ *      If yes, bias outbound company refs toward 'invested_in'.
+ *
+ * Precedence: founded > invested_in > advises > works_at > role prior > mentions.
+ *
+ * The role-prior layer is what closes the gap on partner bios where the prose
+ * lists portfolio companies without repeating the investment verb each time
+ * ("Her current board seats reflect her portfolio: [Co A], [Co B], [Co C]").
  */
-export function inferLinkType(pageType: PageType, context: string): string {
+export function inferLinkType(pageType: PageType, context: string, globalContext?: string, targetSlug?: string): string {
   if (pageType === 'media') {
-    // Media (book, video, etc.) referencing a person/company is a mention,
-    // not an attendance event.
     return 'mentions';
   }
-  // Meeting page type takes precedence over verb-based inference. A meeting
-  // page's links to attendees are always 'attended', regardless of what words
-  // happen to appear in the meeting body or in attendee slugs (e.g. a slug like
-  // "frank-founder" shouldn't make the link work_at).
-  // String-typed comparison: 'meeting' is a valid PageType but the union narrows
-  // oddly across versions; compare as string for resilience.
   if ((pageType as string) === 'meeting') return 'attended';
-  // Per-edge verb rules for non-meeting pages.
+  // Per-edge verb rules.
   if (FOUNDED_RE.test(context)) return 'founded';
-  if (ADVISES_RE.test(context)) return 'advises';
   if (INVESTED_RE.test(context)) return 'invested_in';
+  if (ADVISES_RE.test(context)) return 'advises';
   if (WORKS_AT_RE.test(context)) return 'works_at';
+  // Page-role prior: only fires for person -> company links. Concept pages
+  // about VC topics naturally contain "venture capital" in their text, but
+  // their company refs are mentions, not investments. Partner pages mentioning
+  // other people (co-investors, friends) should also stay as mentions.
+  if (pageType === 'person' && globalContext && targetSlug?.startsWith('companies/')) {
+    if (PARTNER_ROLE_RE.test(globalContext)) return 'invested_in';
+    if (ADVISOR_ROLE_RE.test(globalContext)) return 'advises';
+  }
   return 'mentions';
 }
 

@@ -146,8 +146,25 @@ describe('inferLinkType', () => {
     expect(inferLinkType('person', 'Emily advises Acme on go-to-market.')).toBe('advises');
   });
 
-  test('board member -> advises', () => {
-    expect(inferLinkType('person', 'Jane is a board member at Beta Health.')).toBe('advises');
+  test('"board member" alone is too ambiguous (investors also hold board seats) -> mentions', () => {
+    // Tightened in v0.10.4 after BrainBench rich-prose surfaced that partner
+    // bios ("She sits on the boards of [portfolio company]") were classified
+    // as advises. Generic board language now requires explicit advisor/advise
+    // rooting to count.
+    expect(inferLinkType('person', 'Jane is a board member at Beta Health.')).toBe('mentions');
+  });
+
+  test('explicit advisor language -> advises', () => {
+    expect(inferLinkType('person', 'Jane is an advisor to Beta Health.')).toBe('advises');
+    expect(inferLinkType('person', 'Joined the advisory board at Beta Health.')).toBe('advises');
+  });
+
+  test('investment narrative variants -> invested_in', () => {
+    expect(inferLinkType('person', 'Wendy led the Series A for Cipher Labs.')).toBe('invested_in');
+    expect(inferLinkType('person', 'Bob is an early investor in Acme.')).toBe('invested_in');
+    expect(inferLinkType('person', 'She invests in fintech startups.')).toBe('invested_in');
+    expect(inferLinkType('person', 'Acme is a portfolio company of Founders Fund.')).toBe('invested_in');
+    expect(inferLinkType('person', 'Sequoia led the seed round for Vox.')).toBe('invested_in');
   });
 
   test('default -> mentions', () => {

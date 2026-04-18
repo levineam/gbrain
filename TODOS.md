@@ -46,24 +46,34 @@
 
 **Threshold:** maintain v1 metrics at 30x scale.
 
-### v0.10.4: inferLinkType prose precision fix (driven by BrainBench Cat 2 rich corpus)
-**What:** BrainBench rich-corpus benchmark surfaced that `inferLinkType` mis-classifies invested_in links as `advises` or `mentions` when prose uses phrases like "sits on the boards of [portfolio company]" (common in partner bios). Type accuracy on rich prose is 70.7% vs 94.4% on templated data.
+### ~~v0.10.4: inferLinkType prose precision fix~~
+**Shipped in PR #188.** BrainBench Cat 2 rich-corpus type accuracy went from
+70.7% → 88.5%. Fix: widened verb regexes (added "led the seed/Series A",
+"early investor", "invests in", "portfolio company", etc.), tightened
+ADVISES_RE to require explicit advisor rooting (generic "board member"
+matches investors too), widened context window 80→240 chars, added
+person-page role prior (partner-bio language → invested_in for outbound
+company refs only). Per-type after fix: invested_in 91.7% (was 0%),
+mentions 100%, attended 100%. works_at 58% and advises 41% are next
+iteration's residuals.
 
-**Specific failures from BrainBench v1:**
-- `invested_in`: 67% recall, **0% type accuracy** (60/60 misclassified — all became `mentions`)
-- `advises`: 60% recall, 35% type accuracy
-- `works_at`: 100% recall, 58% type accuracy
+### v0.10.5: inferLinkType residuals (works_at, advises)
+**What:** After the v0.10.4 fix, two link types still under-perform on rich
+prose. Drive these to >85% type accuracy in next iteration.
 
-**Why deferred:** Real fix needs page-role context flowing into inferLinkType (partner page → company should default to `invested_in` unless explicit `advises` verb). Current signature only sees the source page's type, not the person's role. Refactor crosses several files.
+**works_at: 58% type accuracy.** Engineer/employee pages use varied phrasings
+the regex doesn't catch ("spent some time at", "joined the team", narrative
+"is currently at" without a verb). Approach: extend WORKS_AT_RE; consider
+employee-role page prior similar to partner prior.
 
-**Approach options:**
-1. Look up source page in inferLinkType; if person + role=partner, bias toward invested_in
-2. Add a scoring system instead of cascade-of-regexes (each pattern adds confidence to a type, pick highest)
-3. LLM-tier extraction as fallback when regex confidence is low
+**advises: 41% type accuracy.** Advisor pages often describe board roles
+without using the word "advisor" explicitly ("on Beta Health's board",
+"joined Beta as a board member"). The v0.10.4 fix tightened ADVISES_RE to
+require "advisor" rooting to avoid false positives from investors. Need
+a tighter signal that distinguishes "advisor on board" from "investor on
+board" — likely an advisor-role page prior plus verb-pattern combinations.
 
-**Threshold to clear:** type_accuracy on rich-prose corpus > 90%.
-
-**Depends on:** BrainBench Cat 2 baseline (shipped in PR #188).
+**Threshold:** Cat 2 rich-prose type accuracy > 92% (currently 88.5%).
 
 ### v0.10.4: gbrain alias resolution feature (driven by Cat 3)
 **What:** Add an alias table to gbrain so "Sarah Chen" / "S. Chen" / "@schen" / "sarah.chen@example.com" resolve to one canonical entity. Schema: `aliases (id, slug, alias_text)` with a unique index. Search blends alias matches into hybrid scoring.
