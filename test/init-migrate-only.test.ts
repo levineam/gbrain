@@ -22,9 +22,16 @@ let tmp: string;
 let origHome: string | undefined;
 
 function run(args: string[]): { exitCode: number; stdout: string; stderr: string } {
+  // Strip DATABASE_URL / GBRAIN_DATABASE_URL from the subprocess env. The
+  // "no config" error-path tests need loadConfig() to return null, which it
+  // won't if any env var fallback is set (src/core/config.ts:30). Tests
+  // that seed their own config use freshHomeWithConfig() below.
+  const env = { ...process.env, HOME: tmp } as Record<string, string | undefined>;
+  delete env.DATABASE_URL;
+  delete env.GBRAIN_DATABASE_URL;
   try {
     const stdout = execFileSync('bun', ['run', CLI, ...args], {
-      env: { ...process.env, HOME: tmp },
+      env: env as Record<string, string>,
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
