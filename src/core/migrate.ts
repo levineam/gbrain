@@ -306,6 +306,27 @@ const MIGRATIONS: Migration[] = [
         ON budget_reservations(expires_at) WHERE status = 'held';
     `,
   },
+  {
+    version: 12,
+    name: 'minion_quiet_hours_stagger',
+    // Adds quiet-hours gating + deterministic stagger to Minions.
+    //
+    // quiet_hours (JSONB): {start, end, tz, policy} — checked at claim
+    //   time by the worker, not at dispatch. A queued job inside its quiet
+    //   window is released back to 'waiting' and claimed again outside the
+    //   window. 'skip' policy drops the event, 'defer' re-queues.
+    // stagger_key (TEXT): hashed to a minute-slot offset so jobs with the
+    //   same key don't collide when a cron boundary fires. Optional; NULL
+    //   = no stagger. The hash lives in application code (deterministic,
+    //   ensures same key always lands on same slot) so the column is
+    //   just the key.
+    sql: `
+      ALTER TABLE minion_jobs ADD COLUMN IF NOT EXISTS quiet_hours JSONB;
+      ALTER TABLE minion_jobs ADD COLUMN IF NOT EXISTS stagger_key TEXT;
+      CREATE INDEX IF NOT EXISTS idx_minion_jobs_stagger_key
+        ON minion_jobs(stagger_key) WHERE stagger_key IS NOT NULL;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0
