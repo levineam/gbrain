@@ -23,6 +23,7 @@ import { join } from 'path';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { runExtract } from '../../src/commands/extract.ts';
 import { RipgrepBm25Adapter } from './adapters/ripgrep-bm25.ts';
+import { VectorOnlyAdapter } from './adapters/vector-only.ts';
 import type { Adapter, Page, Query, RankedDoc } from './types.ts';
 import { precisionAtK, recallAtK } from './types.ts';
 
@@ -325,6 +326,7 @@ async function main() {
   const allAdapters: Adapter[] = [
     new GbrainAfterAdapter(),
     new RipgrepBm25Adapter(),
+    new VectorOnlyAdapter(),
   ];
   const adapters = only ? allAdapters.filter(a => a.name === only) : allAdapters;
   if (adapters.length === 0) {
