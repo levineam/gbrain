@@ -30,7 +30,7 @@ The abort-path fix is the quietly-important one. Handlers that use `ctx.signal` 
 
 ### What this means for OpenClaw operators
 
-Start a shell-capable worker: `GBRAIN_ALLOW_SHELL_JOBS=1 gbrain jobs work`. Rewrite crontab entries to submit shell jobs instead of running scripts inline on the gateway: `gbrain jobs submit shell --params '{"cmd":"node fetch.mjs","cwd":"/data"}' --max-attempts 3 --timeout-ms 300000`. On Postgres, one persistent worker claims each job in turn. On PGLite, every crontab invocation adds `--follow` for inline execution because PGLite doesn't support the worker daemon. Either way, your gateway CPU stops pinning at 100% and your live messages stop getting blocked by batch processing. See `docs/guides/minions-shell-jobs.md` for the full recipes.
+`gbrain upgrade` reads `skills/migrations/v0.13.0.md` and walks your host agent through the adoption: enable the worker with `GBRAIN_ALLOW_SHELL_JOBS=1`, audit every cron entry (LLM-requiring stays, deterministic moves), propose a rewrite per cron with a diff, verify one fire end-to-end before approving the next batch. Never auto-rewrites your crontab — every change is a human approval per-cron. On Postgres, one persistent worker daemon claims each job. On PGLite, every crontab invocation adds `--follow` for inline execution because PGLite doesn't support the worker daemon. Either way, your gateway CPU stops pinning at 100% and your live messages stop getting blocked by batch processing. See `docs/guides/minions-shell-jobs.md` for usage recipes and `skills/migrations/v0.13.0.md` for the adoption playbook.
 
 ### Itemized changes
 
@@ -62,6 +62,7 @@ Start a shell-capable worker: `GBRAIN_ALLOW_SHELL_JOBS=1 gbrain jobs work`. Rewr
 #### Docs
 
 - **New `docs/guides/minions-shell-jobs.md`** opens with a 30-second copy-paste hello-world, then covers the two-layer security model with honest callouts about what env allowlist does and does not do, Postgres vs PGLite crontab recipes side-by-side, debug playbook (`gbrain jobs list`, `gbrain jobs get`, audit log tail, PGLite `--follow` note), known limitations, and an `#errors` table linked from every `UnrecoverableError` the handler throws.
+- **New `skills/migrations/v0.13.0.md`** is the adoption playbook your host agent reads on `gbrain upgrade`. Walks through enabling the worker, auditing cron entries (LLM-requiring vs deterministic), proposing per-cron rewrites with diffs, and verifying end-to-end before batch approval. Iron rule: never auto-rewrites the operator's crontab — every change is human-approved per-cron.
 - **README.md** links the guide from the Commands section.
 
 #### Pre-ship review
