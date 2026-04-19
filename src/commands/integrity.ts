@@ -353,20 +353,30 @@ async function cmdAuto(args: string[]): Promise<void> {
                   writer, slug, hit, result, handle, dryRun,
                 });
                 bucketAuto++;
-                appendProgress({ slug, status: 'repaired', timestamp: new Date().toISOString() });
+                // Dry-run must NOT persist 'repaired' — the follow-on real
+                // run needs to revisit these slugs and actually write.
+                if (!dryRun) {
+                  appendProgress({ slug, status: 'repaired', timestamp: new Date().toISOString() });
+                }
               } else if (result.confidence >= reviewLower) {
                 appendReview({ slug, hit, result, handle });
                 bucketReview++;
-                appendProgress({ slug, status: 'reviewed', timestamp: new Date().toISOString() });
+                if (!dryRun) {
+                  appendProgress({ slug, status: 'reviewed', timestamp: new Date().toISOString() });
+                }
               } else {
                 logSkip({ slug, hit, reason: `confidence ${result.confidence.toFixed(2)} below threshold ${reviewLower}` });
                 bucketSkip++;
-                appendProgress({ slug, status: 'skipped', timestamp: new Date().toISOString() });
+                if (!dryRun) {
+                  appendProgress({ slug, status: 'skipped', timestamp: new Date().toISOString() });
+                }
               }
             } catch (e) {
               bucketErr++;
               logSkip({ slug, hit, reason: `resolver error: ${e instanceof Error ? e.message : String(e)}` });
-              appendProgress({ slug, status: 'error', timestamp: new Date().toISOString() });
+              if (!dryRun) {
+                appendProgress({ slug, status: 'error', timestamp: new Date().toISOString() });
+              }
             }
           }
         } else if (hits.length > 0 && !handle) {
@@ -375,7 +385,9 @@ async function cmdAuto(args: string[]): Promise<void> {
             logSkip({ slug, hit, reason: 'no x_handle in frontmatter to search from' });
           }
           bucketSkip += hits.length;
-          appendProgress({ slug, status: 'skipped', timestamp: new Date().toISOString() });
+          if (!dryRun) {
+            appendProgress({ slug, status: 'skipped', timestamp: new Date().toISOString() });
+          }
         }
       }
 
