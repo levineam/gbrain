@@ -208,6 +208,37 @@ export async function runDoctor(engine: BrainEngine | null, args: string[]) {
     checks.push({ name: 'graph_coverage', status: 'warn', message: 'Could not check graph coverage' });
   }
 
+  // 9. Integrity sample scan (non-fast only). Read-only — no network,
+  // no writes, no resolver calls. Samples the first 500 pages by slug
+  // order and surfaces bare-tweet + dead-link counts as a warning.
+  // Full-brain scan: `gbrain integrity check`.
+  try {
+    const { scanIntegrity } = await import('./integrity.ts');
+    const res = await scanIntegrity(engine, { limit: 500 });
+    const total = res.bareHits.length + res.externalHits.length;
+    if (total === 0) {
+      checks.push({
+        name: 'integrity',
+        status: 'ok',
+        message: `Sampled ${res.pagesScanned} pages; no bare-tweet phrases or external links.`,
+      });
+    } else if (res.bareHits.length > 0) {
+      checks.push({
+        name: 'integrity',
+        status: 'warn',
+        message: `Sampled ${res.pagesScanned} pages; ${res.bareHits.length} bare-tweet phrase(s), ${res.externalHits.length} external link(s). Run: gbrain integrity check (or integrity auto to repair).`,
+      });
+    } else {
+      checks.push({
+        name: 'integrity',
+        status: 'ok',
+        message: `Sampled ${res.pagesScanned} pages; ${res.externalHits.length} external link(s) (no bare tweets).`,
+      });
+    }
+  } catch (e) {
+    checks.push({ name: 'integrity', status: 'warn', message: `integrity scan skipped: ${e instanceof Error ? e.message : String(e)}` });
+  }
+
   const hasFail = outputResults(checks, jsonOutput);
 
   // Features teaser (non-JSON, non-failing only)

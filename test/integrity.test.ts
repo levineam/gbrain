@@ -7,12 +7,18 @@
  * extraction) that determines what reaches the resolver.
  */
 
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
 import {
   findBareTweetHits,
   findExternalLinks,
   extractXHandleFromFrontmatter,
   runIntegrity,
+  scanIntegrity,
 } from '../src/commands/integrity.ts';
 
 // ---------------------------------------------------------------------------
@@ -160,6 +166,78 @@ describe('extractXHandleFromFrontmatter', () => {
 // ---------------------------------------------------------------------------
 // CLI dispatch — non-DB paths (help + review-on-empty)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// scanIntegrity — pure library function called from doctor + cmdCheck
+// ---------------------------------------------------------------------------
+
+describe('scanIntegrity', () => {
+  let engine: BrainEngine;
+  let dbDir: string;
+
+  beforeAll(async () => {
+    dbDir = mkdtempSync(join(tmpdir(), 'scan-integrity-'));
+    engine = new PGLiteEngine();
+    await engine.connect({ engine: 'pglite', database_path: dbDir });
+    await engine.initSchema();
+    await engine.putPage('people/alice', {
+      type: 'person',
+      title: 'Alice',
+      compiled_truth: 'Alice tweeted about AI safety last week.',
+      timeline: '',
+      frontmatter: {},
+    });
+    await engine.putPage('people/bob', {
+      type: 'person',
+      title: 'Bob',
+      compiled_truth: 'Bob wrote at [example](https://example.com/bob).',
+      timeline: '',
+      frontmatter: {},
+    });
+    await engine.putPage('people/legacy', {
+      type: 'person',
+      title: 'Legacy',
+      compiled_truth: 'Legacy tweeted about old stuff.',
+      timeline: '',
+      frontmatter: { validate: false },
+    });
+  });
+
+  afterAll(async () => {
+    await engine.disconnect();
+    rmSync(dbDir, { recursive: true, force: true });
+  });
+
+  test('counts bare-tweet + external-link hits across pages', async () => {
+    const res = await scanIntegrity(engine);
+    expect(res.pagesScanned).toBe(2);
+    expect(res.bareHits.length).toBe(1);
+    expect(res.bareHits[0].slug).toBe('people/alice');
+    expect(res.externalHits.length).toBe(1);
+    expect(res.externalHits[0].slug).toBe('people/bob');
+  });
+
+  test('skips pages with validate:false frontmatter', async () => {
+    const res = await scanIntegrity(engine);
+    const slugs = res.bareHits.map(h => h.slug);
+    expect(slugs).not.toContain('people/legacy');
+  });
+
+  test('honors limit', async () => {
+    const res = await scanIntegrity(engine, { limit: 1 });
+    expect(res.pagesScanned).toBe(1);
+  });
+
+  test('honors typeFilter prefix match', async () => {
+    const res = await scanIntegrity(engine, { typeFilter: 'companies' });
+    expect(res.pagesScanned).toBe(0);
+  });
+
+  test('topPages sorted by hit count', async () => {
+    const res = await scanIntegrity(engine);
+    expect(res.topPages).toEqual([{ slug: 'people/alice', count: 1 }]);
+  });
+});
 
 describe('runIntegrity CLI dispatch', () => {
   test('--help prints help without touching engine', async () => {

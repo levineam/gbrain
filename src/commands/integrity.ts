@@ -232,49 +232,88 @@ async function cmdCheck(args: string[]): Promise<void> {
 
   const engine = await connect();
   try {
-    const allSlugs = [...(await engine.getAllSlugs())].sort();
-
-    const bareHits: BareTweetHit[] = [];
-    const externalHits: ExternalLinkHit[] = [];
-    let pagesScanned = 0;
-    for (const slug of allSlugs) {
-      if (typeFilter && !slug.startsWith(`${typeFilter}/`)) continue;
-      if (pagesScanned >= limit) break;
-      const page = await engine.getPage(slug);
-      if (!page) continue;
-      pagesScanned++;
-      bareHits.push(...findBareTweetHits(page.compiled_truth, slug));
-      externalHits.push(...findExternalLinks(page.compiled_truth, slug));
-    }
+    const res = await scanIntegrity(engine, { limit, typeFilter });
 
     if (jsonMode) {
       console.log(JSON.stringify({
-        pagesScanned,
-        bareTweetHits: bareHits,
-        externalLinkCount: externalHits.length,
+        pagesScanned: res.pagesScanned,
+        bareTweetHits: res.bareHits,
+        externalLinkCount: res.externalHits.length,
       }, null, 2));
       return;
     }
 
-    console.log(`Scanned ${pagesScanned} pages.`);
-    console.log(`Bare-tweet phrases: ${bareHits.length}`);
-    console.log(`External links (for optional dead-link check): ${externalHits.length}`);
-    if (bareHits.length > 0) {
-      const byPage = new Map<string, BareTweetHit[]>();
-      for (const h of bareHits) {
-        const list = byPage.get(h.slug) ?? [];
-        list.push(h);
-        byPage.set(h.slug, list);
-      }
+    console.log(`Scanned ${res.pagesScanned} pages.`);
+    console.log(`Bare-tweet phrases: ${res.bareHits.length}`);
+    console.log(`External links (for optional dead-link check): ${res.externalHits.length}`);
+    if (res.topPages.length > 0) {
       console.log('\nTop 10 pages with bare-tweet references:');
-      const sortedPages = [...byPage.entries()].sort((a, b) => b[1].length - a[1].length).slice(0, 10);
-      for (const [slug, hits] of sortedPages) {
-        console.log(`  ${slug}: ${hits.length} hit${hits.length === 1 ? '' : 's'}`);
+      for (const { slug, count } of res.topPages) {
+        console.log(`  ${slug}: ${count} hit${count === 1 ? '' : 's'}`);
       }
     }
   } finally {
     await engine.disconnect();
   }
+}
+
+// ---------------------------------------------------------------------------
+// scanIntegrity — pure library function, callable from doctor
+// ---------------------------------------------------------------------------
+
+export interface IntegrityScanOptions {
+  /** Max pages to scan. Default Infinity. Doctor passes a sample limit (~500). */
+  limit?: number;
+  /** Slug prefix filter (e.g. "people") — matches slugs starting with `${typeFilter}/`. */
+  typeFilter?: string;
+}
+
+export interface IntegrityScanResult {
+  pagesScanned: number;
+  bareHits: BareTweetHit[];
+  externalHits: ExternalLinkHit[];
+  /** Top 10 pages sorted by bare-tweet hit count, descending. */
+  topPages: Array<{ slug: string; count: number }>;
+}
+
+/**
+ * Read-only integrity scan over the engine's pages. No network, no writes,
+ * no resolver calls. Called by `gbrain integrity check` for the full report
+ * and by `gbrain doctor` (non-fast) for a sampled health signal.
+ *
+ * Caller owns the engine lifecycle.
+ */
+export async function scanIntegrity(
+  engine: BrainEngine,
+  opts: IntegrityScanOptions = {},
+): Promise<IntegrityScanResult> {
+  const { limit = Infinity, typeFilter } = opts;
+  const allSlugs = [...(await engine.getAllSlugs())].sort();
+
+  const bareHits: BareTweetHit[] = [];
+  const externalHits: ExternalLinkHit[] = [];
+  let pagesScanned = 0;
+
+  for (const slug of allSlugs) {
+    if (typeFilter && !slug.startsWith(`${typeFilter}/`)) continue;
+    if (pagesScanned >= limit) break;
+    const page = await engine.getPage(slug);
+    if (!page) continue;
+    // Skip grandfathered pages (opted out of brain-integrity enforcement)
+    if ((page.frontmatter as Record<string, unknown> | undefined)?.validate === false) continue;
+    pagesScanned++;
+    bareHits.push(...findBareTweetHits(page.compiled_truth, slug));
+    externalHits.push(...findExternalLinks(page.compiled_truth, slug));
+  }
+
+  const byPage = new Map<string, number>();
+  for (const h of bareHits) byPage.set(h.slug, (byPage.get(h.slug) ?? 0) + 1);
+  const topPages = [...byPage.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([slug, count]) => ({ slug, count }));
+
+  return { pagesScanned, bareHits, externalHits, topPages };
 }
 
 // ---------------------------------------------------------------------------
