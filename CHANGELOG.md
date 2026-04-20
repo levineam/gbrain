@@ -2,18 +2,18 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.13.1] - 2026-04-20
+## [0.14.1] - 2026-04-20
 
 ## **Fix wave: 4 hot issues that blocked real brains, landed together.**
 ## **PGLite survives macOS 26.3. Minions actually rescues SIGKILL'd jobs. Autopilot dashboards stop the 14.6s seqscan. `bun install -g` tells you when it's broken.**
 
-v0.13.0 shipped a lot of capability and a lot of edge cases that only surface on production brains. v0.13.1 is the hotfix wave: four user-filed issues, fixed and verified together, plus three scope expansions that close adjacent footguns. Upgrade is automatic. If `gbrain upgrade` runs clean, your brain gets faster and more reliable on the next sync cycle.
+v0.13.0 shipped a lot of capability and a lot of edge cases that only surface on production brains. v0.14.1 is the hotfix wave on top of v0.14.0 (shell job type): four user-filed issues against v0.13.x, fixed and verified together, plus three scope expansions that close adjacent footguns. Upgrade is automatic. If `gbrain upgrade` runs clean, your brain gets faster and more reliable on the next sync cycle.
 
 ### The numbers that matter
 
 The four issues this release closes, with measured impact:
 
-| Issue | Before v0.13.1 | After v0.13.1 | Δ |
+| Issue | Before v0.14.1 | After v0.14.1 | Δ |
 |-------|----------------|----------------|---|
 | #170 `SELECT * FROM pages ORDER BY updated_at DESC` on 31k rows (Postgres) | ~14.6s seqscan | <20ms index scan | ~700x |
 | #219 `max_stalled` default on `minion_jobs` | 1 (first stall → dead) | 5 (four rescues before dead) | claim matches the docs |
@@ -31,7 +31,7 @@ If you install via `bun install -g github:...` (not recommended but people try i
 
 If you're on macOS 26.3 and PGLite was crashing with `Aborted()`, the pin to 0.4.3 gives us the best shot at avoiding the WASM regression (noting: 0.4.3 is unverified against 26.3 in CI — the error-wrap at `pglite-engine.ts connect()` is the safety net if the pin doesn't hold). Any PGLite init failure now shows the #223 link instead of a raw runtime error.
 
-## To take advantage of v0.13.1
+## To take advantage of v0.14.1
 
 `gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
 
@@ -55,7 +55,7 @@ If you're on macOS 26.3 and PGLite was crashing with `Aborted()`, the pin to 0.4
 - `MinionJobInput.max_stalled` — new optional field, plumbed through `queue.add()` with `[1, 100]` clamp.
 - `gbrain jobs submit --max-stalled N` — CLI flag to set per-job stall tolerance.
 - `gbrain jobs submit --backoff-type`, `--backoff-delay`, `--backoff-jitter`, `--timeout-ms`, `--idempotency-key` — scope-expansion audit exposing existing `MinionJobInput` fields as first-class CLI flags.
-- `gbrain jobs smoke --sigkill-rescue` — opt-in regression smoke case that simulates a killed worker and asserts the v0.13.1 default actually rescues.
+- `gbrain jobs smoke --sigkill-rescue` — opt-in regression smoke case that simulates a killed worker and asserts the v0.14.1 default actually rescues.
 - `gbrain doctor --index-audit` — new opt-in Postgres check that reports zero-scan indexes from `pg_stat_user_indexes`. Informational only (no auto-drop). PGLite no-ops.
 - `BrainEngine.kind` readonly discriminator (`'postgres' | 'pglite'`) — lets migrations and consumers branch on engine without `instanceof` + dynamic imports.
 - `package.json trustedDependencies: ["@electric-sql/pglite"]` — lets Bun run PGLite's dep postinstall on global installs.
@@ -76,8 +76,142 @@ If you're on macOS 26.3 and PGLite was crashing with `Aborted()`, the pin to 0.4
 #### Internal
 - `Migration` interface extended with `sqlFor: { postgres?, pglite? }` + `transaction: boolean` fields. Runner picks the engine-specific SQL branch and (on Postgres only) bypasses `engine.transaction()` when `transaction: false` (required for CONCURRENTLY).
 - `scripts/check-jsonb-pattern.sh` extended with a CI guard against `max_stalled DEFAULT 1` regressing.
-- ~15 new unit tests covering max_stalled default/clamp/backfill/v12/v13 semantics. 3 regression tests pinned by IRON RULE.
-- Full E2E suite green (126 pass) against Postgres 16 + pgvector.
+- ~15 new unit tests covering max_stalled default/clamp/backfill/v14/v15 semantics. 3 regression tests pinned by IRON RULE.
+- Full E2E suite green against Postgres 16 + pgvector.
+
+## [0.14.0] - 2026-04-20
+
+## **Move gateway crons to Minions. Zero LLM tokens per cron fire.**
+## **Worker abort path finally marks aborted jobs dead.**
+
+Your OpenClaw gateway pins at 100% CPU when your 32 cron jobs each boot a full Opus session per fire, and ~14 of them are pure API-fetch-and-write scripts that don't need reasoning at all. This release adds a `shell` job type to Minions so those deterministic crons move off the gateway to the Minions worker. ~60% gateway load reduction at OpenClaw scale. Retry, backoff, DLQ, unified `gbrain jobs list` visibility, all free. The LLM-reasoning crons stay on the gateway where they belong.
+
+Getting there meant fixing the Minions worker abort path, which was quietly wrong since v0.11: aborted jobs (timeout, cancel, lock loss) returned silently without calling `failJob`, so status stayed `active` until a stall sweep found them ~30s later. This release makes abort-reason the `error_text` of an immediate `failJob` call. Handlers get cleaner signals, operators see accurate status, `--follow` stops hanging past timeouts.
+
+### The numbers that matter
+
+Measured on the new `test/minions-shell.test.ts` (40 unit cases) and `test/e2e/minions-shell.test.ts` (4 E2E cases) plus 5 rounds of pre-landing review (spec adversarial x2, CEO scope, DX, eng, Codex outside voice).
+
+| Metric                                            | BEFORE v0.14.0          | AFTER v0.14.0                     | Δ                    |
+|---------------------------------------------------|-------------------------|-----------------------------------|----------------------|
+| LLM tokens per cron fire                          | ~full Opus context boot | 0 (deterministic crons)           | **100% reduction**   |
+| Gateway CPU headroom with ~14 crons moved         | 0%                      | ~60% free                         | cron load off gateway|
+| Aborted job status lag (timeout/cancel/lock-loss) | up to 30s               | immediate `failJob` call          | **deterministic**    |
+| Shell submission surfaces                         | none                    | CLI + trusted `submit_job`        | 2 paths, both gated  |
+| Submission audit trail                            | none                    | JSONL at `~/.gbrain/audit/`       | operational trace    |
+| Unit tests                                        | 1318 pass               | **1358 pass (+40 shell cases)**   | +40                  |
+| E2E tests                                         | 124                     | **128 (+4 shell lifecycle)**      | +4                   |
+| Pre-landing review rounds                         | 1 (eng)                 | **5 (spec×2 / CEO / DX / eng / codex)** | 29 issues surfaced, 26 resolved |
+
+The abort-path fix is the quietly-important one. Handlers that use `ctx.signal` for cooperative cancel (sync, embed) now have deterministic status flips instead of waiting for the stall sweep. Shell jobs get reliable timeout semantics for the first time: `cmd: 'sleep 30', timeout_ms: 2000` hits `dead` at ~2100ms instead of ~32000ms.
+
+### What this means for OpenClaw operators
+
+`gbrain upgrade` reads `skills/migrations/v0.14.0.md` and walks your host agent through the adoption: enable the worker with `GBRAIN_ALLOW_SHELL_JOBS=1`, audit every cron entry (LLM-requiring stays, deterministic moves), propose a rewrite per cron with a diff, verify one fire end-to-end before approving the next batch. Never auto-rewrites your crontab — every change is a human approval per-cron. On Postgres, one persistent worker daemon claims each job. On PGLite, every crontab invocation adds `--follow` for inline execution because PGLite doesn't support the worker daemon. Either way, your gateway CPU stops pinning at 100% and your live messages stop getting blocked by batch processing. See `docs/guides/minions-shell-jobs.md` for usage recipes and `skills/migrations/v0.14.0.md` for the adoption playbook.
+
+### Itemized changes
+
+#### New `shell` job type
+
+- **Spawn arbitrary commands as Minions jobs.** Pass `{cmd: "string"}` (shell-interpolated via `/bin/sh -c`) or `{argv: ["bin","arg"]}` (no shell, safe for programmatic callers). Both forms require an absolute `cwd`. Env vars are scoped to a minimal allowlist (`PATH, HOME, USER, LANG, TZ, NODE_ENV`) to prevent accidental `$OPENAI_API_KEY` interpolation; callers opt-in to additional keys per job.
+- **Two-layer security: MCP boundary + env flag.** `submit_job` rejects `name: 'shell'` when `ctx.remote === true`. Independent of the env flag. `MinionQueue.add('shell', ...)` also rejects unless the caller explicitly opts in via `{allowProtectedSubmit: true}` as the 4th arg, so an in-process handler can't programmatically submit a shell child by accident. Worker only registers the handler when `GBRAIN_ALLOW_SHELL_JOBS=1` is set on the worker process. Default: off. Opt in per-host.
+- **Graceful child shutdown.** Abort fires SIGTERM, 5-second grace, then SIGKILL. Listens to both `ctx.signal` (timeout/cancel/lock-loss) and a new `ctx.shutdownSignal` (worker process SIGTERM/SIGINT), so deploy restarts don't orphan shell children. Non-shell handlers ignore `shutdownSignal` and keep running through the worker's 30s cleanup race.
+- **UTF-8-safe output truncation.** stdout is retained as the last 64KB, stderr as the last 16KB, with a `[truncated N bytes]` marker prepended when exceeded. Uses `string_decoder.StringDecoder` so multibyte characters don't split across the truncation boundary.
+- **Operational audit trail at `~/.gbrain/audit/shell-jobs-YYYY-Www.jsonl`** (ISO-week rotation, override via `GBRAIN_AUDIT_DIR`). Records caller, remote flag, job_id, cwd, and cmd/argv display. Never logs env values. Best-effort writes: failures log to stderr but don't block submission. Operational trace for "what did this cron submit last Tuesday," not forensic insurance.
+- **Starvation warning on first-time submission.** If you `gbrain jobs submit shell ...` without `--follow` and no worker with the env flag is running, stderr prints a warning block pointing at both `--follow` and `gbrain jobs work` remediation. Turns a silent "job sits in waiting forever" failure mode into a directed next-step.
+
+#### Worker abort path overhaul
+
+- **Aborted jobs now call `failJob` with the abort reason.** Pre-v0.14.0 worker returned silently when `ctx.signal.aborted` fired, leaving jobs in `active` until stall sweep. Fixed: catch-block now derives reason from `abort.signal.reason` (`timeout`, `cancel`, `lock-lost`, `shutdown`) and calls `failJob(id, token, "aborted: <reason>")`. Token-match makes the call idempotent: if another path already flipped status, it no-ops cleanly. Downstream `--follow` loops and status assertions now reflect reality.
+- **`ctx.shutdownSignal` separated from `ctx.signal`.** Only fires on worker process SIGTERM/SIGINT. Handlers that need shutdown-specific cleanup (currently: shell handler's SIGTERM→SIGKILL on its child) subscribe to both signals. Non-shell handlers subscribe only to `ctx.signal` and don't get cancelled mid-flight on deploy restart.
+
+#### CLI + operation surface additions
+
+- **`gbrain jobs submit --timeout-ms N`.** Per-job wall-clock timeout in ms. Surfaced from the existing `timeout_ms` schema field, which had no CLI flag before.
+- **`submit_job` operation gains `timeout_ms` param.** Same field exposed through MCP (for non-protected names).
+- **`gbrain jobs submit --help` lists handler types.** `shell` is explicitly called out as CLI-only with a pointer to the guide. Closes the "what handlers are even available" discovery gap.
+
+#### Tests
+
+- **40 new unit cases in `test/minions-shell.test.ts`** covering validation (cmd/argv/cwd/env), spawn happy + error paths, UTF-8 safe truncation, SIGTERM abort via both signals, env allowlist (OPENAI_API_KEY blocked, PATH inherited, caller override), ISO-week filename at year boundary (2027-01-01 → W53 2026), audit write happy + EACCES failure paths, whitespace-bypass defense on `MinionQueue.add(' shell ', ...)`, and auto-added regression tests per the iron rule (non-protected names unaffected).
+- **4 E2E tests in `test/e2e/minions-shell.test.ts`** covering full lifecycle (submit → worker claim → spawn → complete with captured stdout), `MinionQueue.add` defense-in-depth, `submit_job` MCP-guard rejection, `submit_job` CLI-path acceptance.
+
+#### Docs
+
+- **New `docs/guides/minions-shell-jobs.md`** opens with a 30-second copy-paste hello-world, then covers the two-layer security model with honest callouts about what env allowlist does and does not do, Postgres vs PGLite crontab recipes side-by-side, debug playbook (`gbrain jobs list`, `gbrain jobs get`, audit log tail, PGLite `--follow` note), known limitations, and an `#errors` table linked from every `UnrecoverableError` the handler throws.
+- **New `skills/migrations/v0.14.0.md`** is the adoption playbook your host agent reads on `gbrain upgrade`. Walks through enabling the worker, auditing cron entries (LLM-requiring vs deterministic), proposing per-cron rewrites with diffs, and verifying end-to-end before batch approval. Iron rule: never auto-rewrites the operator's crontab — every change is human-approved per-cron.
+- **README.md** links the guide from the Commands section.
+
+#### Pre-ship review
+
+Five independent rounds surfaced 29 issues across the plan. 26 resolved before a single line of code was written: spec-review adversarial subagent (x2 iterations) caught implementer-ergonomic gaps (caller derivation, mkdirSync, ISO-week formatter). CEO review + SELECTIVE EXPANSION cherry-picked argv form, audit log, SIGTERM grace, env allowlist, MCP-guard defense-in-depth, honest FS-read trust model, orphan-child `setTimeout.unref()` fix. DX review added the starvation warning block. Eng review added `ctx.shutdownSignal` separation, revised trusted-arg from opts-fold to separate 4th arg (stops accidental pass-through via `{...userOpts}` spreads), 18 additional test cases, 4 iron-rule regression tests. Codex outside voice caught 4 architectural dealbreakers: the worker abort silent-return bug (the "contract is a lie" finding), `--timeout-ms` CLI flag and `submit_job` param both missing, `PROTECTED_JOB_NAMES.has(name)` whitespace bypass before normalization. Effort estimate revised 8-10h → 16-20h once the full review was done.
+## [0.13.1] - 2026-04-20
+
+## **The brain stops being a write-once graph and starts being a runtime.**
+## **Five new modules land on top of v0.12's knowledge graph layer.**
+
+GBrain v0.13.1 ships the Knowledge Runtime delta on top of v0.13.0's frontmatter graph. Typed abstractions that turn a knowledge base into a runtime other agents can adopt. Five focused modules build on the v0.12.0 graph layer and v0.11.x Minions orchestration. A Resolver SDK unifies external lookups. A BrainWriter enforces integrity pre-commit. `gbrain integrity` repairs bare-tweet citations at scale. A BudgetLedger caps runaway resolver spend. Minions gains TZ-aware quiet-hours at claim time.
+
+### What you can do now that you couldn't before
+
+- **`gbrain integrity --auto --confidence 0.8`** repairs the 1,424 bare-tweet citations in your brain without human review. Three-bucket confidence: auto-repair ≥0.8, review queue 0.5–0.8, skip <0.5. Resumable via `~/.gbrain/integrity-progress.jsonl`.
+- **`gbrain resolvers list`** introspects the typed plugin registry. Two builtins ship: `url_reachable` (HEAD check + SSRF guard) and `x_handle_to_tweet` (X API v2 with confidence scoring). Every result carries `{value, confidence, source, fetchedAt, costEstimate, raw}`.
+- **`gbrain config set budget.daily_cap_usd 10`** puts a hard wall on resolver spend. Concurrent reserves serialize via `SELECT FOR UPDATE`. TTL auto-reclaim handles process death between reserve and commit.
+- **BrainWriter + pre-commit validators** make the Philip-Leung hallucination class structurally impossible. `Scaffolder` builds every tweet URL from API output, never LLM text. `SlugRegistry` detects name collisions at create time. Four validators (citation, link, back-link, triple-HR) run on write. `writer.lint_on_put_page=true` enables observability before the strict-mode flip.
+- **Quiet-hours on Minion jobs** stop the 3am DM. Set `quiet_hours: {start:22, end:7, tz:"America/Los_Angeles", policy:"defer"}` on a job. Worker checks at claim time (not dispatch). Wrap-around windows supported.
+
+### Schema migrations
+
+Three new migrations, all idempotent, apply automatically on `gbrain init` / upgrade.
+
+- **v11 — budget_ledger + budget_reservations.** Per-(scope, resolver, local_date) rollup with held-reservation TTL. Rollback: DROP TABLE (budget is regenerable from resolver call logs).
+- **v12 — minion_jobs.quiet_hours + stagger_key.** Additive nullable columns; existing rows keep working unchanged.
+- **TS v0.13.1 — grandfather `validate: false`.** Walks every page, adds the opt-out frontmatter so legacy content skips the new validators. `gbrain integrity --auto` clears the flag per-page as citations are repaired. Rollback log at `~/.gbrain/migrations/v0_13_1-rollback.jsonl`.
+
+### Out of scope (intentional, per CEO plan)
+
+- **Strict-mode default flip.** BrainWriter ships with `strict_mode=lint`. The flip to strict requires a 7-day soak + BrainBench regression ≤1pt + zero false-positive count.
+- **Sandboxed user plugins.** v0.13 ships builtins only. User-provided TS modules deferred pending a real isolation story (worker_threads or vm2) in a follow-on release.
+- **`openai_embedding` refactor.** Deferred to PR 1.5 post-flip; embedding is a hot path.
+- **Wintermute `claw-bridge`.** Adoption path is documentation-only this release.
+
+### Tests
+
+- **89 new unit tests** across `test/resolvers.test.ts` (43), `test/writer.test.ts` (57), `test/integrity.test.ts` (21), `test/enrichment.test.ts` (23), `test/minions-quiet-hours.test.ts` (25), `test/post-write-lint.test.ts` (11), `test/migrations-v0_13_0.test.ts` (5).
+- **E2E passes on Postgres:** 115 pass / 0 fail across mechanical, sync, upgrade, minions concurrency + resilience, graph-quality, MCP, migration-flow, search-quality, skills (Tier 2 Opus/Sonnet).
+- **1574 total tests pass** with an active test Postgres container. 1522 pass in unit-only mode (E2E auto-skip without DATABASE_URL).
+
+### Itemized changes
+
+#### Resolver SDK (`src/core/resolvers/`)
+`Resolver<I, O>` interface with `{id, cost, backend, available(), resolve()}`. In-memory `ResolverRegistry`. `ResolverContext` carries `{engine, storage, config, logger, requestId, remote, deadline?, signal?}` — the `remote` flag mirrors `OperationContext.remote` for uniform trust boundaries. `FailImproveLoop.execute` gained optional `opts.signal`; backwards compatible. Two reference builtins: `url_reachable` (SSRF guard reuses wave-3 `isInternalUrl`, max-5 redirects with per-hop re-validation, AbortSignal composition) and `x_handle_to_tweet` (X API v2 recent search, strict handle regex, confidence-scored matches, 2x 429 retry honoring Retry-After, 401/403 → `ResolverError(auth)`). `gbrain resolvers list|describe` for introspection.
+
+#### BrainWriter + validators (`src/core/output/`)
+`BrainWriter.transaction(fn, ctx)` over `engine.transaction` with pre-commit validators via `WriteTx` API. Scaffolder builds typed citations (`tweetCitation`, `emailCitation`, `sourceCitation`) + `entityLink` + `timelineLine` — URLs from structured IDs, never LLM text. `SlugRegistry` detects collisions at create time. Four validators (`citation`, `link`, `back-link`, `triple-hr`) skip fenced code / inline code / HTML comments correctly. Config flag `writer.strict_mode` (default `lint`).
+
+#### gbrain integrity (`src/commands/integrity.ts`)
+Four subcommands: `check` (read-only report with `--json`, `--type`, `--limit`), `auto` (three-bucket repair with `--confidence`, `--review-lower`, `--dry-run`, `--fresh`, `--limit`), `review` (prints queue path + count), `reset-progress`. Nine bare-tweet phrase regexes. External-link extraction for optional dead-link probing. Repairs route through `BrainWriter.transaction`.
+
+#### BudgetLedger + CompletenessScorer (`src/core/enrichment/`)
+`BudgetLedger.reserve` returns `{kind:'held'}` or `{kind:'exhausted'}`. FOR UPDATE serializes concurrent reserves. `commit`, `rollback`, `cleanupExpired`. Midnight rollover via `Intl.DateTimeFormat` en-CA in configured IANA tz. Seven per-type rubrics + default (weights sum to 1.0). Person rubric's `non_redundancy` and `recency_score` kill Wintermute's length-only heuristic + 30-day-re-enrich-forever pathologies.
+
+#### Minions scheduler polish (`src/core/minions/`)
+`quiet-hours.ts` — pure `evaluateQuietHours(cfg, now?)`. Wrap-around windows. Unknown tz fails open. `stagger.ts` — FNV-1a → 0–59 deterministic across runtimes. `worker.ts` integrated: post-claim evaluation, defer → `delayed/+15m`, skip → `cancelled`.
+
+#### Post-write lint hook (`src/core/output/post-write.ts`)
+`runPostWriteLint` invokes the four validators against freshly-written pages. Gated on `writer.lint_on_put_page` (default false). Wired into `put_page` operation handler as non-blocking. Findings go to `~/.gbrain/validator-lint.jsonl` + `engine.logIngest`.
+
+#### Design doc
+`docs/designs/KNOWLEDGE_RUNTIME.md` — 717 lines covering the 4-layer architecture, integration seams, 7-phase migration path, 10 open questions. Promoted to repo so future contributors can trace decisions.
+
+#### Prior learnings applied
+- Snapshot slugs upfront (`engine.getAllSlugs()`) in grandfather migration — avoids pagination-mutation instability.
+- TS-registry migrations only (post-v0.11.1 migration-discovery change).
+- Migration never calls `saveConfig` — avoids Postgres→PGLite flip.
+- Quiet-hours at claim/promote, not dispatch — queued job becomes claimable after window opens.
+- Core fn pattern for any handler wrapping a CLI command.
+- Schema v11 not v8 (graph layer took v8-v10).
+- `gray-matter` + line tokenizer for citation parsing, not `marked.lexer`.
 
 ## [0.13.0] - 2026-04-20
 

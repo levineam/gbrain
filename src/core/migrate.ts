@@ -363,31 +363,68 @@ export const MIGRATIONS: Migration[] = [
   },
   {
     version: 12,
+    name: 'budget_ledger',
+    // Resolver spend tracker. Primary key {scope, resolver_id, local_date} so
+    // midnight rollover in the user's TZ naturally creates a new row instead of
+    // mutating yesterday's. reserved_usd and committed_usd track reservations
+    // vs actuals so process death between reserve() and commit()/rollback()
+    // can be cleaned up by TTL scan. Rollback: DROP TABLE (regenerable from
+    // resolver call logs; no durable product data lives here).
+    sql: `
+      CREATE TABLE IF NOT EXISTS budget_ledger (
+        scope          TEXT        NOT NULL,
+        resolver_id    TEXT        NOT NULL,
+        local_date     DATE        NOT NULL,
+        reserved_usd   NUMERIC(12,4) NOT NULL DEFAULT 0,
+        committed_usd  NUMERIC(12,4) NOT NULL DEFAULT 0,
+        cap_usd        NUMERIC(12,4),
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (scope, resolver_id, local_date)
+      );
+      CREATE TABLE IF NOT EXISTS budget_reservations (
+        reservation_id TEXT        PRIMARY KEY,
+        scope          TEXT        NOT NULL,
+        resolver_id    TEXT        NOT NULL,
+        local_date     DATE        NOT NULL,
+        estimate_usd   NUMERIC(12,4) NOT NULL,
+        reserved_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        expires_at     TIMESTAMPTZ NOT NULL,
+        status         TEXT        NOT NULL DEFAULT 'held'
+      );
+      CREATE INDEX IF NOT EXISTS idx_budget_reservations_expires
+        ON budget_reservations(expires_at) WHERE status = 'held';
+    `,
+  },
+  {
+    version: 13,
+    name: 'minion_quiet_hours_stagger',
+    // Adds quiet-hours gating + deterministic stagger to Minions.
+    sql: `
+      ALTER TABLE minion_jobs ADD COLUMN IF NOT EXISTS quiet_hours JSONB;
+      ALTER TABLE minion_jobs ADD COLUMN IF NOT EXISTS stagger_key TEXT;
+      CREATE INDEX IF NOT EXISTS idx_minion_jobs_stagger_key
+        ON minion_jobs(stagger_key) WHERE stagger_key IS NOT NULL;
+    `,
+  },
+  {
+    version: 14,
     name: 'pages_updated_at_index',
-    // v0.13.1: fixes the 14.6s "list pages newest-first" seqscan on 31k+ row brains.
+    // v0.14.1 (fix wave): fixes the 14.6s "list pages newest-first" seqscan on 31k+ row brains.
     // Original report: https://github.com/garrytan/gbrain/issues/170 (PR #215).
     //
-    // Engine-aware (via handler, not SQL): Postgres uses CREATE INDEX
-    // CONCURRENTLY to avoid the write-blocking SHARE lock on `pages`
-    // (autopilot brains with 500k+ rows would otherwise stall for seconds).
-    // CONCURRENTLY refuses to run inside a transaction AND postgres.js's
-    // multi-statement `.unsafe()` wraps in an implicit transaction, so we
-    // run each statement as a separate call via the handler.
-    //
-    // A failed CONCURRENTLY build leaves behind an invalid index with the
-    // target name. Subsequent IF NOT EXISTS would skip it, marking the
-    // migration successful with an invalid index (query stays slow). The
-    // handler pre-drops any invalid remnant via pg_index.indisvalid check.
-    //
-    // PGLite has no concurrent writers and runs everything in a single
-    // connection; plain CREATE INDEX is safe. Handler branches on engine.kind.
+    // Engine-aware via handler (not SQL): Postgres uses CREATE INDEX CONCURRENTLY
+    // to avoid the write-blocking SHARE lock on `pages`. CONCURRENTLY refuses to
+    // run inside a transaction AND postgres.js's multi-statement `.unsafe()` wraps
+    // in an implicit transaction, so the handler runs each statement as a separate
+    // call. A failed CONCURRENTLY leaves an invalid index with the target name;
+    // the handler pre-drops any invalid remnant via pg_index.indisvalid. PGLite
+    // has no concurrent writers, so plain CREATE is safe.
     sql: '',
     handler: async (engine) => {
       if (engine.kind === 'postgres') {
-        // Postgres: two sequential, un-transacted statements.
-        // Step 1: drop any invalid remnant from a previous failed CONCURRENTLY.
         await engine.runMigration(
-          12,
+          14,
           `DO $$ BEGIN
              IF EXISTS (
                SELECT 1 FROM pg_index i
@@ -398,16 +435,14 @@ export const MIGRATIONS: Migration[] = [
              END IF;
            END $$;`
         );
-        // Step 2: CREATE CONCURRENTLY (separate statement, no implicit transaction).
         await engine.runMigration(
-          12,
+          14,
           `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_pages_updated_at_desc
              ON pages (updated_at DESC);`
         );
       } else {
-        // PGLite: plain CREATE is fine; no concurrent writers.
         await engine.runMigration(
-          12,
+          14,
           `CREATE INDEX IF NOT EXISTS idx_pages_updated_at_desc
              ON pages (updated_at DESC);`
         );
@@ -415,24 +450,14 @@ export const MIGRATIONS: Migration[] = [
     },
   },
   {
-    version: 13,
+    version: 15,
     name: 'minion_jobs_max_stalled_default_5',
-    // v0.13.1: fixes https://github.com/garrytan/gbrain/issues/219
-    //
-    // Problem: original schema shipped DEFAULT 1, meaning first stall →
-    // dead-letter. The "SIGKILL mid-flight, 10/10 rescued" claim was false
-    // out-of-the-box. New default is 5 (headroom for flaky deploys without
-    // letting a genuinely stuck worker linger forever).
-    //
-    // Two statements:
-    //   1. ALTER DEFAULT for new rows.
-    //   2. UPDATE for rows already in non-terminal statuses. Statuses come
-    //      directly from src/core/minions/types.ts MinionJobStatus. Terminal
-    //      statuses (completed/failed/dead/cancelled) are intentionally
-    //      untouched. Row locks serialize against concurrent claim() which
-    //      uses FOR UPDATE SKIP LOCKED, so this is race-safe.
-    //
-    // Idempotent: second run's UPDATE matches zero rows.
+    // v0.14.1 (fix wave): fixes https://github.com/garrytan/gbrain/issues/219
+    // Shipped default was 1 — first stall = dead-letter, contradicting the
+    // "SIGKILL rescued" claim. New default 5. UPDATE backfills existing non-
+    // terminal rows so upgrading brains don't keep dead-lettering queued work.
+    // Statuses come from MinionJobStatus in types.ts. Row locks serialize
+    // against claim()'s FOR UPDATE SKIP LOCKED — race-safe. Idempotent.
     sql: `
       ALTER TABLE minion_jobs ALTER COLUMN max_stalled SET DEFAULT 5;
       UPDATE minion_jobs

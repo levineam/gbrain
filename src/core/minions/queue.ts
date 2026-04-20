@@ -15,6 +15,16 @@ import type {
 } from './types.ts';
 import { rowToMinionJob, rowToInboxMessage, rowToAttachment } from './types.ts';
 import { validateAttachment } from './attachments.ts';
+import { isProtectedJobName } from './protected-names.ts';
+
+/** Options for opting into protected-job-name submission. Passed as a separate
+ *  4th arg to `MinionQueue.add()` (NOT folded into `opts`) so user-spread
+ *  `{...userOpts}` payloads can't accidentally carry the trust flag. */
+export interface TrustedSubmitOpts {
+  /** When true, allow submission of names in PROTECTED_JOB_NAMES (currently 'shell').
+   *  Set only by the CLI path and by `submit_job` when `ctx.remote === false`. */
+  allowProtectedSubmit?: boolean;
+}
 
 const MIGRATION_VERSION = 7;
 
@@ -55,9 +65,24 @@ export class MinionQueue {
    * to 'waiting-children' atomically. Idempotency_key dedups via PG unique
    * partial index; same key returns the existing row (no second insert).
    */
-  async add(name: string, data?: Record<string, unknown>, opts?: Partial<MinionJobInput>): Promise<MinionJob> {
-    if (!name || name.trim().length === 0) {
+  async add(
+    name: string,
+    data?: Record<string, unknown>,
+    opts?: Partial<MinionJobInput>,
+    trusted?: TrustedSubmitOpts,
+  ): Promise<MinionJob> {
+    // Normalize first so the protected-name check and the insert use the same
+    // canonical form. Without the trim-before-check, `queue.add(' shell ', ...)`
+    // would evade the guard and insert a job literally named 'shell'.
+    const jobName = (name || '').trim();
+    if (jobName.length === 0) {
       throw new Error('Job name cannot be empty');
+    }
+    if (isProtectedJobName(jobName) && !trusted?.allowProtectedSubmit) {
+      throw new Error(
+        `protected job name '${jobName}' requires CLI or operation-local submitter ` +
+        `(pass {allowProtectedSubmit: true} as the 4th arg to MinionQueue.add)`,
+      );
     }
     await this.ensureSchema();
 
@@ -109,10 +134,11 @@ export class MinionQueue {
 
       // 3. Insert child. Use ON CONFLICT for idempotency; if a concurrent submit
       //    raced past the fast-path SELECT, the unique index catches it here.
-      //    When opts.max_stalled is provided we include the column in the INSERT
-      //    (clamped to [1, 100]). When omitted, we leave the column out so the
-      //    schema DEFAULT (5 as of v0.13.1) kicks in. Keeps the app layer from
-      //    having to track the schema default constant.
+      //    v13 quiet_hours + stagger_key always present (null fallback; schema
+      //      stores NULL). v15 max_stalled is conditional: provided values get
+      //      clamped to [1, 100] and included in the INSERT; omitted values
+      //      skip the column so the schema DEFAULT (5 as of v0.14.1) kicks in.
+      //      Keeps the app layer from hardcoding the schema default constant.
       const hasMaxStalled = opts?.max_stalled !== undefined && opts.max_stalled !== null;
       const clampedMaxStalled = hasMaxStalled
         ? Math.max(1, Math.min(100, Math.floor(opts!.max_stalled as number)))
@@ -120,10 +146,11 @@ export class MinionQueue {
 
       const baseCols = `name, queue, status, priority, data, max_attempts, backoff_type,
             backoff_delay, backoff_jitter, delay_until, parent_job_id, on_child_fail,
-            depth, max_children, timeout_ms, remove_on_complete, remove_on_fail, idempotency_key`;
-      const baseVals = `$1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18`;
+            depth, max_children, timeout_ms, remove_on_complete, remove_on_fail, idempotency_key,
+            quiet_hours, stagger_key`;
+      const baseVals = `$1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20`;
       const cols = hasMaxStalled ? `${baseCols}, max_stalled` : baseCols;
-      const vals = hasMaxStalled ? `${baseVals}, $19` : baseVals;
+      const vals = hasMaxStalled ? `${baseVals}, $21` : baseVals;
 
       const insertSql = opts?.idempotency_key
         ? `INSERT INTO minion_jobs (${cols})
@@ -135,7 +162,7 @@ export class MinionQueue {
            RETURNING *`;
 
       const params: unknown[] = [
-        name.trim(),
+        jobName,
         opts?.queue ?? 'default',
         childStatus,
         opts?.priority ?? 0,
@@ -153,6 +180,8 @@ export class MinionQueue {
         opts?.remove_on_complete ?? false,
         opts?.remove_on_fail ?? false,
         opts?.idempotency_key ?? null,
+        opts?.quiet_hours ?? null,
+        opts?.stagger_key ?? null,
       ];
       if (hasMaxStalled) params.push(clampedMaxStalled);
 
