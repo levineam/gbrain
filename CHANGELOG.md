@@ -2,18 +2,18 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.14.1] - 2026-04-20
+## [0.14.2] - 2026-04-20
 
 ## **Fix wave: 4 hot issues that blocked real brains, landed together.**
 ## **PGLite survives macOS 26.3. Minions actually rescues SIGKILL'd jobs. Autopilot dashboards stop the 14.6s seqscan. `bun install -g` tells you when it's broken.**
 
-v0.13.0 shipped a lot of capability and a lot of edge cases that only surface on production brains. v0.14.1 is the hotfix wave on top of v0.14.0 (shell job type): four user-filed issues against v0.13.x, fixed and verified together, plus three scope expansions that close adjacent footguns. Upgrade is automatic. If `gbrain upgrade` runs clean, your brain gets faster and more reliable on the next sync cycle.
+v0.13.0 shipped a lot of capability and a lot of edge cases that only surface on production brains. v0.14.2 is the hotfix wave on top of v0.14.0 (shell job type) + v0.14.1 (doctor DRY + `--fix`): four user-filed issues against v0.13.x, fixed and verified together, plus three scope expansions that close adjacent footguns. Upgrade is automatic. If `gbrain upgrade` runs clean, your brain gets faster and more reliable on the next sync cycle.
 
 ### The numbers that matter
 
 The four issues this release closes, with measured impact:
 
-| Issue | Before v0.14.1 | After v0.14.1 | Δ |
+| Issue | Before v0.14.2 | After v0.14.2 | Δ |
 |-------|----------------|----------------|---|
 | #170 `SELECT * FROM pages ORDER BY updated_at DESC` on 31k rows (Postgres) | ~14.6s seqscan | <20ms index scan | ~700x |
 | #219 `max_stalled` default on `minion_jobs` | 1 (first stall → dead) | 5 (four rescues before dead) | claim matches the docs |
@@ -25,13 +25,13 @@ The four issues this release closes, with measured impact:
 
 If you run autopilot against a Supabase brain with 30k+ pages, your health/dashboard cycle was silently burning 14.6 seconds on every iteration. The new index drops that to single-digit milliseconds without locking writes (Postgres gets `CREATE INDEX CONCURRENTLY` with an invalid-index cleanup DO block; PGLite gets plain `CREATE INDEX` since it has no concurrent writers). Your agent stops blocking on list-pages-by-date queries.
 
-If you use Minions, the "SIGKILL mid-flight, 10/10 rescued" claim is now actually true out-of-the-box. Default `max_stalled=5` means a kill -9'd worker gets picked up by the next worker instead of dead-lettered on first stall. v13 migration backfills existing non-terminal rows (`waiting/active/delayed/waiting-children/paused`) so upgrading doesn't leave a queue full of doomed jobs.
+If you use Minions, the "SIGKILL mid-flight, 10/10 rescued" claim is now actually true out-of-the-box. Default `max_stalled=5` means a kill -9'd worker gets picked up by the next worker instead of dead-lettered on first stall. v15 migration backfills existing non-terminal rows (`waiting/active/delayed/waiting-children/paused`) so upgrading doesn't leave a queue full of doomed jobs.
 
 If you install via `bun install -g github:...` (not recommended but people try it), you'll now see a loud stderr warning with a link to #218 instead of a broken CLI that fails on next invocation. The real fix is `git clone + bun link`, documented in README and INSTALL_FOR_AGENTS.md.
 
 If you're on macOS 26.3 and PGLite was crashing with `Aborted()`, the pin to 0.4.3 gives us the best shot at avoiding the WASM regression (noting: 0.4.3 is unverified against 26.3 in CI — the error-wrap at `pglite-engine.ts connect()` is the safety net if the pin doesn't hold). Any PGLite init failure now shows the #223 link instead of a raw runtime error.
 
-## To take advantage of v0.14.1
+## To take advantage of v0.14.2
 
 `gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
 
@@ -50,12 +50,12 @@ If you're on macOS 26.3 and PGLite was crashing with `Aborted()`, the pin to 0.4
 ### Itemized changes
 
 #### Added
-- Schema migration **v12** — `CREATE INDEX [CONCURRENTLY] IF NOT EXISTS idx_pages_updated_at_desc ON pages (updated_at DESC)` (engine-aware; Postgres uses CONCURRENTLY with an invalid-index DO-block cleanup, PGLite uses plain CREATE). Closes #170. Contributed by @fuleinist (#215).
-- Schema migration **v13** — `ALTER TABLE minion_jobs ALTER COLUMN max_stalled SET DEFAULT 5` + `UPDATE` backfill scoped to non-terminal statuses. Closes #219. Reported by @macbotmini-eng.
+- Schema migration **v14** — `CREATE INDEX [CONCURRENTLY] IF NOT EXISTS idx_pages_updated_at_desc ON pages (updated_at DESC)` (engine-aware; Postgres uses CONCURRENTLY with an invalid-index DO-block cleanup, PGLite uses plain CREATE). Closes #170. Contributed by @fuleinist (#215).
+- Schema migration **v15** — `ALTER TABLE minion_jobs ALTER COLUMN max_stalled SET DEFAULT 5` + `UPDATE` backfill scoped to non-terminal statuses. Closes #219. Reported by @macbotmini-eng.
 - `MinionJobInput.max_stalled` — new optional field, plumbed through `queue.add()` with `[1, 100]` clamp.
 - `gbrain jobs submit --max-stalled N` — CLI flag to set per-job stall tolerance.
 - `gbrain jobs submit --backoff-type`, `--backoff-delay`, `--backoff-jitter`, `--timeout-ms`, `--idempotency-key` — scope-expansion audit exposing existing `MinionJobInput` fields as first-class CLI flags.
-- `gbrain jobs smoke --sigkill-rescue` — opt-in regression smoke case that simulates a killed worker and asserts the v0.14.1 default actually rescues.
+- `gbrain jobs smoke --sigkill-rescue` — opt-in regression smoke case that simulates a killed worker and asserts the v0.14.2 default actually rescues.
 - `gbrain doctor --index-audit` — new opt-in Postgres check that reports zero-scan indexes from `pg_stat_user_indexes`. Informational only (no auto-drop). PGLite no-ops.
 - `BrainEngine.kind` readonly discriminator (`'postgres' | 'pglite'`) — lets migrations and consumers branch on engine without `instanceof` + dynamic imports.
 - `package.json trustedDependencies: ["@electric-sql/pglite"]` — lets Bun run PGLite's dep postinstall on global installs.
@@ -78,6 +78,69 @@ If you're on macOS 26.3 and PGLite was crashing with `Aborted()`, the pin to 0.4
 - `scripts/check-jsonb-pattern.sh` extended with a CI guard against `max_stalled DEFAULT 1` regressing.
 - ~15 new unit tests covering max_stalled default/clamp/backfill/v14/v15 semantics. 3 regression tests pinned by IRON RULE.
 - Full E2E suite green against Postgres 16 + pgvector.
+
+## [0.14.1] - 2026-04-20
+
+## **`gbrain doctor` stops crying wolf on DRY, and now repairs the real ones.**
+## **Skill delegations via `_brain-filing-rules.md` finally count.**
+
+`gbrain doctor --fast` was flagging 9 DRY violations on this repo, every run, for skills that properly delegated to `skills/_brain-filing-rules.md`. The old check only accepted `conventions/quality.md` as a valid delegation target, so every skill that correctly filed notability rules through the brain-filing-rules module got flagged anyway. Alert fatigue eroded every other doctor warning. v0.14.1 swaps the substring match for proximity-based suppression: a delegation reference within 40 lines of a pattern match (across `> **Convention:**`, `> **Filing rule:**`, and inline backtick paths) now correctly suppresses the violation.
+
+The release also adds `gbrain doctor --fix` and `gbrain doctor --fix --dry-run`. Instead of telling you what's wrong, doctor can now repair it. Five guards keep the edits safe: refuses if the working tree is dirty (git is the rollback), refuses if the skill isn't inside a git repo (no rollback available), skips matches inside fenced code blocks (examples are not violations), skips when the pattern matches more than once (ambiguous), skips when a delegation reference already exists within 40 lines. Shell-injection safe via `execFileSync` array args. Trailing newline preserved. No `.bak` clutter, git is the backup contract.
+
+### The numbers that matter
+
+Measured on this repo's real skill library (28 skills, 3 cross-cutting patterns):
+
+| Metric                                         | BEFORE v0.14.1      | AFTER v0.14.1                | Δ                 |
+|------------------------------------------------|---------------------|------------------------------|-------------------|
+| False-positive DRY violations                  | 1 flagged, 0 fixable| 0 flagged                    | **cleaner signal**|
+| Genuine DRY violations surfaced                | 8                   | 8 (unchanged)                | honest count      |
+| Auto-repairable via `--fix --dry-run`          | 0                   | 7 proposed, 4 intelligently skipped | new capability |
+| Unit tests for doctor/resolver/dry-fix         | 24                  | **55 (+31)**                 | +31               |
+| Adversarial review fixes in ship               | 0                   | **4 ship-blockers caught + fixed** | defense in depth |
+
+The 4 adversarial fixes are worth calling out: shell injection via `execFileSync` array args, a silent-overwrite bug when skills live outside a git repo (now returns `no_git_backup`), EOF newline preservation on splice, and delegation-proximity consistency between detector (40 lines) and idempotency guard (now also 40 lines, was 10).
+
+### What this means for you
+
+Your agent's `gbrain doctor` output now means something again. Nine warnings a run was noise you learned to ignore; one real warning is signal. And when the doctor does flag an inlined rule, `gbrain doctor --fast --fix --dry-run` shows you exactly what the repair looks like before you commit to it. Run `gbrain doctor --fast --fix` to apply. Git is the undo button.
+
+## To take advantage of v0.14.1
+
+`gbrain upgrade` does this automatically. No manual migration required.
+
+1. **Verify the detection fix:**
+   ```bash
+   gbrain doctor --fast --json | jq '.checks[] | select(.name=="resolver_health")'
+   ```
+2. **Try the auto-fix preview on your own brain:**
+   ```bash
+   gbrain doctor --fast --fix --dry-run
+   ```
+3. **Apply when ready:**
+   ```bash
+   gbrain doctor --fast --fix
+   ```
+4. **If anything looks wrong,** please file an issue:
+   https://github.com/garrytan/gbrain/issues with the `gbrain doctor --json` output.
+
+### Itemized changes
+
+#### Added
+- `gbrain doctor --fix` applies `> **Convention:**` reference callouts to skills that inline cross-cutting rules (Iron Law back-linking, citation format, notability gate). `--dry-run` previews the diff without writing.
+- Three shape-aware block expanders (bullet, blockquote, paragraph) in `src/core/dry-fix.ts`, each a pure function, each with unit tests.
+- New `extractDelegationTargets()` helper in `src/core/check-resolvable.ts` parses `> **Convention:** `, `> **Filing rule:** `, and inline backtick references, normalizing paths to the `CROSS_CUTTING_PATTERNS.conventions` shape.
+- `getWorkingTreeStatus()` returns 3-state `'clean' | 'dirty' | 'not_a_repo'` so the fixer never writes to files git can't roll back.
+
+#### Changed
+- `CROSS_CUTTING_PATTERNS` each list multiple valid delegation targets (notability gate accepts both `conventions/quality.md` and `_brain-filing-rules.md`).
+- DRY suppression is proximity-based: `DRY_PROXIMITY_LINES = 40` for detector AND the fix-module's idempotency check (was inconsistent: 40 vs 10).
+- Shell execution uses `execFileSync` with array args (no shell, no injection surface from manifest-derived paths).
+
+#### Tests
+- 31 new tests across `test/check-resolvable.test.ts` (DRY detection, 13 cases), `test/dry-fix.test.ts` (unit, 28 cases including expander pure-function tests), `test/doctor-fix.test.ts` (CLI integration, 3 cases).
+- Full suite: 1694 pass, 0 fail.
 
 ## [0.14.0] - 2026-04-20
 
