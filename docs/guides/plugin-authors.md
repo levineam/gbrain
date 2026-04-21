@@ -1,9 +1,9 @@
 # Plugin authors guide (v0.15)
 
 `gbrain` discovers subagent definitions from outside this repo via
-`GBRAIN_PLUGIN_PATH`. If you maintain a downstream agent (Wintermute,
-a workflow host, a private tool) and want to ship custom subagents
-alongside it, drop a plugin directory on that env path.
+`GBRAIN_PLUGIN_PATH`. If you maintain a downstream agent (your OpenClaw
+deployment, a workflow host, a private tool) and want to ship custom
+subagents alongside it, drop a plugin directory on that env path.
 
 This guide is for plugin authors. The CLI user doesn't need to read it.
 
@@ -130,10 +130,10 @@ may consume more of them.
    the `put_page` operation (fail-closed if `viaSubagent=true`). Don't
    try to route around it; you'll get `permission_denied`.
 
-## Example: a Wintermute-flavored plugin
+## Example: a downstream-OpenClaw plugin
 
 ```
-~/wintermute/
+~/your-openclaw/
 └── gbrain-plugin/
     ├── gbrain.plugin.json
     └── subagents/
@@ -142,22 +142,22 @@ may consume more of them.
         └── daily-task-prep.md
 ```
 
-`~/wintermute/gbrain-plugin/gbrain.plugin.json`:
+`~/your-openclaw/gbrain-plugin/gbrain.plugin.json`:
 
 ```json
 {
-  "name": "wintermute",
+  "name": "your-openclaw",
   "version": "2026.4.20",
   "plugin_version": "gbrain-plugin-v1",
-  "description": "Wintermute's personal-brain subagents"
+  "description": "Your OpenClaw's personal-brain subagents"
 }
 ```
 
 Environment:
 
 ```bash
-export GBRAIN_PLUGIN_PATH="$HOME/wintermute/gbrain-plugin"
+export GBRAIN_PLUGIN_PATH="$HOME/your-openclaw/gbrain-plugin"
 ```
 
-Then Wintermute calls `gbrain agent run --subagent-def meeting-ingestion
+Then your OpenClaw calls `gbrain agent run --subagent-def meeting-ingestion
 --fanout-by transcript ...` and its definitions load automatically.

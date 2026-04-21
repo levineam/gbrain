@@ -2,7 +2,7 @@
  * `gbrain skillpack-check` — agent-readable health report.
  *
  * Wraps `gbrain doctor --json` + `gbrain apply-migrations --list` into a
- * single JSON blob a host agent (Wintermute's morning-briefing, any
+ * single JSON blob a host agent (your OpenClaw's morning-briefing, any
  * OpenClaw cron) can consume without parsing two subcommands.
  *
  * Usage:

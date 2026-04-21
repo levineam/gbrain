@@ -384,7 +384,7 @@ Worker startup prints:
 [minion worker] subagent handlers enabled
 ```
 
-### 2. Ship your subagents as a plugin (Wintermute + similar)
+### 2. Ship your subagents as a plugin (OpenClaw + similar)
 
 Move your custom subagent definitions out of your gbrain fork and into your own
 repo as a plugin. Concretely:
@@ -402,7 +402,7 @@ repo as a plugin. Concretely:
 
 ```json
 {
-  "name": "wintermute",
+  "name": "your-openclaw",
   "version": "2026.4.20",
   "plugin_version": "gbrain-plugin-v1"
 }

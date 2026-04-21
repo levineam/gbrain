@@ -128,7 +128,7 @@ export const v0_15_0: Migration = {
       'as first-class Minion jobs. Crash-resumable turn persistence, two-phase tool ledger, ' +
       'lease-based rate limit, parent-child fan-out with aggregation. Entry points: `gbrain ' +
       'agent run` and `gbrain agent logs`. See docs/guides/plugin-authors.md for shipping ' +
-      'custom subagent defs from a host repo (Wintermute etc.).',
+      'custom subagent defs from a host repo (your OpenClaw etc.).',
   },
   orchestrator,
 };

@@ -1,7 +1,7 @@
 /**
  * GBRAIN_PLUGIN_PATH loader for host-repo subagent definitions (v0.15).
  *
- * Wintermute (and future downstream agents) ship custom subagent defs
+ * Your OpenClaw (and future downstream agents) ship custom subagent defs
  * from their own repos. gbrain discovers them at worker startup via
  * GBRAIN_PLUGIN_PATH = colon-separated absolute paths (like $PATH). Each
  * path must contain a gbrain.plugin.json manifest describing the plugin

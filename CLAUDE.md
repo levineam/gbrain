@@ -520,6 +520,21 @@ search engines, surfaced in cross-references, and distributed with every release
 - Example meeting → `meetings/2026-04-03` (generic date is fine)
 - Example user → `you` or `the user`, never a proper name
 
+**Specific rule: never say `Wintermute` in any CHANGELOG, README, doc, PR, or
+commit message.** When the temptation is to illustrate with the real fork name:
+- Reader-facing copy → `your OpenClaw` (covers Wintermute, Hermes, AlphaClaw,
+  and any other downstream OpenClaw deployment in one term the reader already
+  recognizes).
+- First-person / origin-story copy → `Garry's OpenClaw` (honest that this is
+  the production deployment driving the feature, without exposing the private
+  agent's name).
+
+`Wintermute` may appear in private artifacts (scratch plans under
+`~/.gstack/projects/…`, memory files, conversation transcripts, CEO-review
+plans) — those aren't distributed. Anything checked into this repo or shipped
+in a release must use the OpenClaw phrasing above. Sweeping a stale reference
+is a small clean-up PR, not a debate.
+
 **When in doubt, ask yourself:** "Would this query reveal private information
 about the user's contacts, investments, or portfolio if it were read by a
 stranger?" If yes, replace with generic placeholders.

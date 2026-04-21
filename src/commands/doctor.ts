@@ -88,7 +88,7 @@ export async function runDoctor(engine: BrainEngine | null, args: string[], dbSo
   // status:"complete" for the same version, the install is mid-migration.
   // Typical cause: v0.11.0 stopgap wrote a partial record but nobody ran
   // `gbrain apply-migrations --yes` afterward. This check fires on every
-  // `gbrain doctor` invocation so Wintermute's health skill catches it.
+  // `gbrain doctor` invocation so your OpenClaw's health skill catches it.
   try {
     const completed = loadCompletedMigrations();
     const byVersion = new Map<string, { complete: boolean; partial: boolean }>();

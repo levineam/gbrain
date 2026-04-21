@@ -701,7 +701,7 @@ const get_backlinks: Operation = {
  * grows a `visited` array per path; in `direction=both` the join is `OR`-based and
  * fans out exponentially. Without a cap, a remote MCP caller can pass depth=1e6
  * and burn memory/CPU on the database. 10 hops is well beyond any realistic
- * relationship query (Wintermute's "people who attended meetings with Alice"
+ * relationship query (your OpenClaw's "people who attended meetings with Alice"
  * is 2 hops; the deepest meaningful chain in our test data is 4).
  */
 const TRAVERSE_DEPTH_CAP = 10;
