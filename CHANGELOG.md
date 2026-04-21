@@ -2,7 +2,7 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.15.0] - 2026-04-20
+## [0.17.0] - 2026-04-20
 
 ## **BrainBench v1 lands as a public benchmark. 4 adapters scored side-by-side, graph layer worth +31 points P@5.**
 ## **Portable JSON schemas at `eval/schemas/` make v2 (Python + Inspect AI + Docker) a driver swap, not a rewrite.**
@@ -69,9 +69,96 @@ If you're porting BrainBench to a different driver (Python + Inspect AI + Docker
 - Eng Review (FULL_REVIEW) — 7 issues surfaced and resolved in the plan.
 - Codex Review — 21 findings, 11 P0/P1 incorporated into Revision 3 of the plan. Cross-model agreement rate 9% (91% of Codex's findings were unique to Codex).
 
-**Tests:** 1471 → **1796 pass** (+325 from master merges), 0 failures, 179 skipped (E2E requiring `DATABASE_URL`).
+**Tests:** 1471 → **2082 pass** (+325 from master merges, +314 new eval tests), 0 failures, 174 skipped (E2E requiring `DATABASE_URL`).
 
-**Deferred to follow-up PRs:** Day 3b corpus generation (~$15 Opus, user-run), Days 4-10 (pdf-parse + flight-recorder + tool-bridge + agent adapter + judge + Cat 5/6/8/9/11 runners + sealed-qrels enforcement + `all.ts` rewrite). See `/Users/garrytan/.claude/plans/` for the full plan.
+**Days 4-10 also ship in this PR (BrainBench v1 Complete):**
+- **Day 4** — `pdf-parse` devDep + `eval/runner/recorder.ts` (6-artifact flight-recorder with atomic writes + collision retry) + `eval/runner/tool-bridge.ts` (12 read + 3 dry-run tools, `expand:false` hard-set on `query` to kill hidden Haiku calls, 32K tool-output cap, poison-slug tagging).
+- **Day 5** — `eval/runner/adapters/claude-sonnet-with-tools.ts` (Sonnet agent loop, turn cap 10, exponential backoff on rate limits) + `eval/runner/judge.ts` (Haiku via structured evidence contract — raw tool output NEVER reaches the judge, so paraphrased injection payloads in `gold/poison.json` are defeated by construction).
+- **Day 6** — `eval/runner/adversarial-injections.ts` (6 kinds: code-fence leak, inline-code slug, substring collision, ambiguous role, prose-only mention, multi-entity sentence) + `eval/runner/cat6-prose-scale.ts` (baseline-only prose scale eval) + `eval/runner/cat11-multimodal.ts` (PDF/audio/HTML fidelity with opt-in transcription).
+- **Day 7** — `eval/runner/cat5-provenance.ts` with dedicated `classify_claim` tool returning the three-way label `supported | unsupported | over-generalized`.
+- **Day 8** — `eval/runner/cat8-skill-compliance.ts` (brain-first / back-link / citation-format / tier-escalation metrics, deterministic from tool-bridge trace — no judge call needed) + `eval/runner/cat9-workflows.ts` (rubric-graded scenarios per workflow with per-workflow pass-rate rollup).
+- **Day 9** — `PublicPage` + `PublicQuery` + `sanitizePage` + `sanitizeQuery` in `eval/runner/types.ts`; `multi-adapter.ts` sanitizes at the adapter boundary so `_facts` and `gold` cannot leak. Honest soft-seal documentation; hard-seal via process isolation ships with v2 Docker.
+- **Day 10** — `eval/runner/all.ts` rewrite from `execSync` sequential to async subprocess fanout with `p-limit(2)` concurrency cap + `eval/runner/llm-budget.ts` (shared Anthropic-call semaphore across agent + judge, default 4 concurrent). `BRAINBENCH_N={1,5,10}` tiers map to smoke / iteration / published.
+
+**Corpus generation (Day 3b — run locally by the author):** 398 Opus calls, 84K input / 38K output tokens, **\$4.12 spent** (vs \$20 cap, vs \$12 estimate). 418 items landed under `eval/data/amara-life-v1/` with 10 planted contradictions, 5 stale facts, 5 paraphrased-injection poison items, 3 implicit preferences. Corpus itself stays local until the v0.18 brainbench split (per design-doc direction: `brainbench` becomes a standalone MIT sibling repo that depends on `gbrain`, keeping this repo lean).
+
+**Deferred to v0.18 (brainbench split):** Moving `eval/`, `test/eval/`, `docs/benchmarks/*`, the corpus, and all Cat runners into `github.com/garrytan/brainbench`. gbrain stays the knowledge-brain CLI + library; brainbench consumes it via GitHub-URL dep. Matches the v2 design-doc topology.
+
+## [0.14.2] - 2026-04-20
+
+## **Eight deferred bugs, root-cause fixes, one clean wave.**
+## **Sync stops losing files. Migrations stop retrying forever. Pooler users get a knob.**
+
+Eight bugs were previously scoped out of a PR after Codex review caught wrong root causes and unimplementable architectures. v0.14.2 takes each back to the actual code and fixes the structural gap. `/plan-eng-review` + `/codex consult` verified every load-bearing claim before a single line of code ran (20 findings, 12 triggered plan revisions before implementation).
+
+The practical wins for a busy brain: `gbrain sync` no longer silently loses files with unquoted-colon YAML titles across any of the three sync paths. `gbrain upgrade` can't get stuck in an infinite retry loop on a wedged migration (3-partial cap + `--force-retry` escape hatch). Supabase pooler users have `GBRAIN_POOL_SIZE` to throttle without touching schemas. `gbrain doctor --fast` tells you WHY it's skipping DB checks instead of lying about no database being configured. `brain_score` gets a breakdown so 79/100 tells you which component is costing you the 21 points.
+
+### The numbers that matter
+
+Measured on this branch's diff against origin/master:
+
+| Metric                                            | BEFORE v0.14.2      | AFTER v0.14.2              | Δ                       |
+|---------------------------------------------------|---------------------|-----------------------------|-------------------------|
+| Sync paths that silently drop files on YAML break | 3 of 3              | 0 of 3                      | **no more silent loss** |
+| Wedged-migration retry loops                      | infinite            | 3-partial cap + `--force-retry` | bounded              |
+| Pool-size knob for Supabase pooler                | none                | `GBRAIN_POOL_SIZE` env      | **first-class knob**    |
+| `doctor --fast` messages                          | 1 catch-all         | 3 source-specific           | honest signal           |
+| `brain_score` observability                       | one number          | 5-field breakdown (sum == total) | diagnosable         |
+| Duplicate edges in `gbrain graph` output          | leaked per-origin   | deduped at presentation      | schema preserved        |
+| `minion_jobs.max_stalled` default                 | 1 (dead-letter on first stall) | 3                | autopilot survives long embed runs |
+| New + extended unit tests                         | 1696                | **1743 (+47 + 119 new assertions)** | +47                |
+| Root-cause fixes vs symptom patches               | 0                   | **8 / 8**                   | structural              |
+
+### What this means for you
+
+Your agent's feedback loops tighten. When sync blocks, doctor surfaces the exact file with the YAML problem and the commit where it showed up. When a migration gets stuck, there's a cap and a clear escape. When you're on Supabase's transaction pooler and `gbrain upgrade` spawns subprocesses, set `GBRAIN_POOL_SIZE=2` and stop MaxClients crashes. Run `gbrain doctor` and the `brain_score` breakdown points at what to fix first: embed coverage, link density, timeline coverage, orphans, or dead links.
+
+## To take advantage of v0.14.2
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Supabase pooler users (port 6543) now have a knob.** If you hit MaxClients during upgrades, set `GBRAIN_POOL_SIZE=2` (or lower) in your environment before running `gbrain upgrade`.
+3. **Check sync health after the upgrade:**
+   ```bash
+   gbrain doctor
+   ```
+   If it warns about `sync_failures`, the paths and errors are in `~/.gbrain/sync-failures.jsonl`. Fix the offending YAML frontmatter and re-run `gbrain sync`, or use `gbrain sync --skip-failed` to acknowledge known-broken files and advance past them.
+4. **Wedged migrations:** If `doctor` ever flags a version with 3 consecutive partials, run `gbrain apply-migrations --force-retry vX.Y.Z` to reset the state machine, then `gbrain apply-migrations --yes` to re-attempt.
+5. **If any step fails or the numbers look wrong,** file an issue: https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - contents of `~/.gbrain/upgrade-errors.jsonl` if it exists
+   - which step broke
+
+### Itemized changes
+
+#### Reliability
+- **Bug 2: `GBRAIN_POOL_SIZE` env knob** (`src/core/db.ts`, `src/commands/import.ts`). Honored by both the singleton pool and the parallel-import worker pool. Defaults to 10; lower for Supabase transaction pooler. `initPostgres` / `initPGLite` now wrap lifecycle in `try { ... } finally { await engine.disconnect() }`.
+- **Bug 3: Migration ledger centralization + wedge cap** (`src/commands/apply-migrations.ts`, `src/core/preferences.ts`). Runner owns all ledger writes. 3 consecutive partials = wedged, skipped with a loud message. New `--force-retry <version>` flag writes a `'retry'` marker without faking success. `complete` status never regresses. `appendCompletedMigration` is idempotent on double-complete.
+- **Bug 8: `max_stalled` default 1 → 3** (`src/core/schema-embedded.ts`, `src/core/pglite-schema.ts`, `src/schema.sql`). First lock-lost tick no longer dead-letters. `v0_14_0` Phase A ALTERs existing installs. `autopilot-cycle` handler yields to the event loop between phases so the worker's lock-renewal timer fires.
+- **Bug 9: Sync gate + acknowledge mechanism** (`src/commands/sync.ts`, `src/commands/import.ts`, `src/core/sync.ts`). All 3 sync paths (incremental, full via `runImport`, `gbrain import` git continuity) gate `sync.last_commit` on no-failures. Failures append to `~/.gbrain/sync-failures.jsonl` with dedup key. New `gbrain sync --skip-failed` + `--retry-failed` flags. Doctor surfaces unacknowledged failures.
+
+#### Observability
+- **Bug 7: `doctor --fast` source-aware messages** (`src/core/config.ts`, `src/cli.ts`, `src/commands/doctor.ts`). New `getDbUrlSource()` returns `'env:GBRAIN_DATABASE_URL' | 'env:DATABASE_URL' | 'config-file' | null`. Doctor emits `Skipping DB checks (--fast mode, URL present from env:GBRAIN_DATABASE_URL)` when applicable.
+- **Bug 11: `brain_score` breakdown + metric clarity** (`src/core/types.ts`, both engines' `getHealth()`). Added `embed_coverage_score`, `link_density_score`, `timeline_coverage_score`, `no_orphans_score`, `no_dead_links_score`. Sum equals `brain_score` by construction. `dead_links` now on `BrainHealth` (resolves a pre-existing `featuresTeaserForDoctor` drift). `orphan_pages` docs clarified — it's "islanded" (no inbound AND no outbound), not the stricter "zero inbound" graph definition.
+
+#### Graph correctness
+- **Bug 6/10: `jsonb_agg(DISTINCT ...)` in legacy `traverseGraph`** (`src/core/postgres-engine.ts`, `src/core/pglite-engine.ts`). Presentation-level dedup only — the schema continues to preserve per-`origin_page_id` / per-`link_source` provenance rows. Fixes duplicate edges like `works_at → companies/brex` appearing twice in `gbrain graph`.
+
+#### New migration
+- **Bug 5: `v0_14_0` migration registered** (`src/commands/migrations/v0_14_0.ts`). Phase A: `ALTER minion_jobs.max_stalled SET DEFAULT 3` (idempotent). Phase B: emits `pending-host-work.jsonl` entry pointing at `skills/migrations/v0.14.0.md` for shell-jobs adoption. Registered in `src/commands/migrations/index.ts`. `package.json` bumped to 0.14.2 (0.14.0 and 0.14.1 were taken by upstream during this branch's work).
+
+#### Tests
+- New: `test/traverse-graph-dedup.test.ts`, `test/sync-failures.test.ts`, `test/brain-score-breakdown.test.ts`, `test/migration-resume.test.ts`, `test/migrations-v0_14_0.test.ts`.
+- Extended: `test/migrate.test.ts` (`resolvePoolSize`), `test/doctor.test.ts` (`dbSource`), `test/apply-migrations.test.ts` (`skippedFuture` includes `0.14.0`).
+- E2E updated: `test/e2e/migration-flow.test.ts` assertions aligned with the new runner-owned-ledger contract (orchestrator no longer writes completed.jsonl directly).
+
+#### Deferred to v0.15
+- Deep `AbortSignal` threading through `runEmbedCore` / `runExtractCore` / `runBacklinksCore` / `performSync`. Between-phase yield addresses the Bug 8 lock-renewal root cause; mid-phase cancellation on huge brains belongs in the queue-polish PR.
+- `failJobFromSweeper` for `handleTimeouts` / `handleStalled`. Current direct `status='dead'` writes kept.
 
 ## [0.14.1] - 2026-04-20
 
