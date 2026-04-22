@@ -119,8 +119,12 @@ interface PersistedToolExec {
  */
 export function makeSubagentHandler(deps: SubagentDeps) {
   const engine = deps.engine;
-  const client: MessagesClient =
-    deps.client ?? (new Anthropic() as unknown as MessagesClient);
+  const anthropicInstance = deps.client ?? (() => {
+    const sdk = new Anthropic();
+    // Wrap SDK's messages.create() to match MessagesClient interface
+    return { create: sdk.messages.create.bind(sdk.messages) } as MessagesClient;
+  })();
+  const client: MessagesClient = anthropicInstance;
   const config = deps.config ?? loadConfig() ?? ({ engine: 'postgres' } as GBrainConfig);
   const rateLeaseKey = deps.rateLeaseKey ?? DEFAULT_RATE_KEY;
   const maxConcurrent = deps.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
