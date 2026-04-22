@@ -426,17 +426,21 @@ export class PostgresEngine implements BrainEngine {
     const linkSources = links.map(l => l.link_source || 'markdown');
     const originSlugs = links.map(l => l.origin_slug || null);
     const originFields = links.map(l => l.origin_field || null);
+    const fromSourceIds = links.map(l => l.from_source_id || 'default');
+    const toSourceIds = links.map(l => l.to_source_id || 'default');
+    const originSourceIds = links.map(l => l.origin_source_id || 'default');
     const result = await sql`
       INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source, origin_page_id, origin_field)
       SELECT f.id, t.id, v.link_type, v.context, v.link_source, o.id, v.origin_field
       FROM unnest(
         ${fromSlugs}::text[], ${toSlugs}::text[], ${linkTypes}::text[],
         ${contexts}::text[], ${linkSources}::text[], ${originSlugs}::text[],
-        ${originFields}::text[]
-      ) AS v(from_slug, to_slug, link_type, context, link_source, origin_slug, origin_field)
-      JOIN pages f ON f.slug = v.from_slug
-      JOIN pages t ON t.slug = v.to_slug
-      LEFT JOIN pages o ON o.slug = v.origin_slug
+        ${originFields}::text[], ${fromSourceIds}::text[], ${toSourceIds}::text[],
+        ${originSourceIds}::text[]
+      ) AS v(from_slug, to_slug, link_type, context, link_source, origin_slug, origin_field, from_source_id, to_source_id, origin_source_id)
+      JOIN pages f ON f.slug = v.from_slug AND f.source_id = v.from_source_id
+      JOIN pages t ON t.slug = v.to_slug AND t.source_id = v.to_source_id
+      LEFT JOIN pages o ON o.slug = v.origin_slug AND o.source_id = v.origin_source_id
       ON CONFLICT (from_page_id, to_page_id, link_type, link_source, origin_page_id) DO NOTHING
       RETURNING 1
     `;
@@ -779,19 +783,18 @@ export class PostgresEngine implements BrainEngine {
   async addTimelineEntriesBatch(entries: TimelineBatchInput[]): Promise<number> {
     if (entries.length === 0) return 0;
     const sql = this.sql;
-    // unnest() pattern: 5 array-typed bound parameters regardless of batch size.
     const slugs = entries.map(e => e.slug);
     const dates = entries.map(e => e.date);
-    // Normalize optional fields to '' to match per-row addTimelineEntry + NOT NULL DDL.
     const sources = entries.map(e => e.source || '');
     const summaries = entries.map(e => e.summary);
     const details = entries.map(e => e.detail || '');
+    const sourceIds = entries.map(e => e.source_id || 'default');
     const result = await sql`
       INSERT INTO timeline_entries (page_id, date, source, summary, detail)
       SELECT p.id, v.date::date, v.source, v.summary, v.detail
-      FROM unnest(${slugs}::text[], ${dates}::text[], ${sources}::text[], ${summaries}::text[], ${details}::text[])
-        AS v(slug, date, source, summary, detail)
-      JOIN pages p ON p.slug = v.slug
+      FROM unnest(${slugs}::text[], ${dates}::text[], ${sources}::text[], ${summaries}::text[], ${details}::text[], ${sourceIds}::text[])
+        AS v(slug, date, source, summary, detail, source_id)
+      JOIN pages p ON p.slug = v.slug AND p.source_id = v.source_id
       ON CONFLICT (page_id, date, summary) DO NOTHING
       RETURNING 1
     `;

@@ -494,3 +494,115 @@ describeE2E('v0.18.0 multi-source — storage backfill against file_migration_le
     expect(uploaded.has('default/topics/storage/doc.pdf')).toBe(true);
   });
 });
+
+// v0.18.0: real-Postgres regression guard for the addLinksBatch /
+// addTimelineEntriesBatch JOIN fan-out bug. Before the fix, the JOIN was
+// `pages.slug = v.from_slug` unqualified — so two pages sharing the same
+// slug across sources would silently duplicate edges and timeline rows.
+// postgres-js binds arrays through `unnest()` rather than inline VALUES,
+// so the query shape is structurally different from PGLite's and gets its
+// own coverage.
+describeE2E('v0.18.0 multi-source — addLinksBatch / addTimelineEntriesBatch source-awareness', () => {
+  beforeAll(async () => {
+    await setupDB();
+    const conn = getConn();
+    await conn.unsafe(`DELETE FROM sources WHERE id != 'default'`);
+    await conn.unsafe(`DELETE FROM file_migration_ledger`);
+  });
+  afterAll(async () => { await teardownDB(); });
+
+  async function seedSameSlugTwoSources() {
+    const conn = getConn();
+    const engine = getEngine() as PostgresEngine;
+    // Second source alongside 'default'.
+    await conn.unsafe(
+      `INSERT INTO sources (id, name) VALUES ('alt', 'alt') ON CONFLICT (id) DO NOTHING`
+    );
+    // Create same-slug pages in both sources. putPage defaults to 'default'.
+    await engine.putPage('topics/ai', { type: 'concept', title: 'AI (default)', compiled_truth: '', timeline: '' });
+    await engine.putPage('topics/ml', { type: 'concept', title: 'ML (default)', compiled_truth: '', timeline: '' });
+    await conn.unsafe(
+      `INSERT INTO pages (slug, type, title, compiled_truth, timeline, frontmatter, content_hash, source_id, updated_at)
+       VALUES ('topics/ai', 'concept', 'AI (alt)', '', '', '{}'::jsonb, 'alt-ai-hash', 'alt', now()),
+              ('topics/ml', 'concept', 'ML (alt)', '', '', '{}'::jsonb, 'alt-ml-hash', 'alt', now())`
+    );
+  }
+
+  test('addLinksBatch without explicit source_id does NOT fan out across sources', async () => {
+    await seedSameSlugTwoSources();
+    const conn = getConn();
+    const engine = getEngine() as PostgresEngine;
+    // Reset links from any prior describe block.
+    await conn.unsafe(`DELETE FROM links`);
+    const inserted = await engine.addLinksBatch([
+      { from_slug: 'topics/ai', to_slug: 'topics/ml', link_type: 'mention' },
+    ]);
+    // Exactly one edge (default → default). Before the fix this was 2.
+    expect(inserted).toBe(1);
+    const rows = await conn.unsafe(
+      `SELECT f.source_id AS from_src, t.source_id AS to_src
+       FROM links l
+       JOIN pages f ON f.id = l.from_page_id
+       JOIN pages t ON t.id = l.to_page_id`
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].from_src).toBe('default');
+    expect(rows[0].to_src).toBe('default');
+  });
+
+  test('addLinksBatch supports cross-source edges when explicit source_ids differ', async () => {
+    const conn = getConn();
+    const engine = getEngine() as PostgresEngine;
+    await conn.unsafe(`DELETE FROM links`);
+    const inserted = await engine.addLinksBatch([
+      {
+        from_slug: 'topics/ai', to_slug: 'topics/ml', link_type: 'mention',
+        from_source_id: 'default', to_source_id: 'alt',
+      },
+    ]);
+    expect(inserted).toBe(1);
+    const rows = await conn.unsafe(
+      `SELECT f.source_id AS from_src, t.source_id AS to_src
+       FROM links l
+       JOIN pages f ON f.id = l.from_page_id
+       JOIN pages t ON t.id = l.to_page_id`
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].from_src).toBe('default');
+    expect(rows[0].to_src).toBe('alt');
+  });
+
+  test('addTimelineEntriesBatch without explicit source_id does NOT fan out across sources', async () => {
+    const conn = getConn();
+    const engine = getEngine() as PostgresEngine;
+    await conn.unsafe(`DELETE FROM timeline_entries`);
+    const inserted = await engine.addTimelineEntriesBatch([
+      { slug: 'topics/ai', date: '2024-01-15', summary: 'Founded' },
+    ]);
+    expect(inserted).toBe(1);
+    const rows = await conn.unsafe(
+      `SELECT p.source_id
+       FROM timeline_entries te
+       JOIN pages p ON p.id = te.page_id`
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].source_id).toBe('default');
+  });
+
+  test('addTimelineEntriesBatch with explicit alt source_id lands only in alt', async () => {
+    const conn = getConn();
+    const engine = getEngine() as PostgresEngine;
+    await conn.unsafe(`DELETE FROM timeline_entries`);
+    const inserted = await engine.addTimelineEntriesBatch([
+      { slug: 'topics/ai', date: '2024-02-01', summary: 'Alt-only event', source_id: 'alt' },
+    ]);
+    expect(inserted).toBe(1);
+    const rows = await conn.unsafe(
+      `SELECT p.source_id
+       FROM timeline_entries te
+       JOIN pages p ON p.id = te.page_id`
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].source_id).toBe('alt');
+  });
+});
