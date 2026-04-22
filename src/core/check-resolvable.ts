@@ -20,6 +20,7 @@ import {
   loadRoutingFixtures,
   runRoutingEval,
 } from './routing-eval.ts';
+import { runFilingAudit } from './filing-audit.ts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -44,7 +45,10 @@ export interface ResolvableIssue {
     | 'routing_miss'
     | 'routing_ambiguous'
     | 'routing_false_positive'
-    | 'routing_fixture_lint';
+    | 'routing_fixture_lint'
+    // Check 6 (W3): brain-filing audit findings.
+    | 'filing_missing_writes_to'
+    | 'filing_unknown_directory';
   severity: 'error' | 'warning';
   skill: string;
   message: string;
@@ -488,6 +492,25 @@ export function checkResolvable(skillsDir: string): ResolvableReport {
       skill: 'routing-eval',
       message: `Malformed routing fixture ${m.file}:${m.line}`,
       action: `Fix the JSONL in routing-eval.jsonl at line ${m.line}: ${m.error}`,
+    });
+  }
+
+  // Check 6 (W3, v0.17): brain-filing audit. Warning-only per
+  // D-CX-3 + D-CX-5 — does not break CI for workspaces that haven't
+  // adopted writes_pages:/writes_to: yet. Any errors in the rules
+  // doc itself surface as a single fatal-ish entry.
+  try {
+    const filingReport = runFilingAudit(skillsDir);
+    for (const issue of filingReport.issues) {
+      issues.push(issue);
+    }
+  } catch (err) {
+    issues.push({
+      type: 'filing_unknown_directory',
+      severity: 'warning',
+      skill: 'brain-filing-rules',
+      message: `_brain-filing-rules.json failed to load`,
+      action: `Fix skills/_brain-filing-rules.json: ${(err as Error).message}`,
     });
   }
 
