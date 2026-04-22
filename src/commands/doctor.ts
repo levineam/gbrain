@@ -276,22 +276,28 @@ export async function runDoctor(engine: BrainEngine | null, args: string[], dbSo
     // best-effort; never fail doctor on this check
   }
 
-  // 5. RLS
+  // 5. RLS — check ALL public tables, not just gbrain's own.
+  // Any table without RLS in the public schema is a security risk:
+  // Supabase exposes the public schema via PostgREST, so tables without
+  // RLS are readable/writable by anyone with the anon key.
   progress.heartbeat('rls');
   try {
     const sql = db.getConnection();
     const tables = await sql`
       SELECT tablename, rowsecurity FROM pg_tables
       WHERE schemaname = 'public'
-        AND tablename IN ('pages','content_chunks','links','tags','raw_data',
-                           'page_versions','timeline_entries','ingest_log','config','files')
     `;
     const noRls = tables.filter((t: any) => !t.rowsecurity);
     if (noRls.length === 0) {
-      checks.push({ name: 'rls', status: 'ok', message: 'RLS enabled on all tables' });
+      checks.push({ name: 'rls', status: 'ok', message: `RLS enabled on all ${tables.length} public tables` });
     } else {
       const names = noRls.map((t: any) => t.tablename).join(', ');
-      checks.push({ name: 'rls', status: 'warn', message: `RLS not enabled on: ${names}` });
+      checks.push({
+        name: 'rls',
+        status: 'fail',
+        message: `${noRls.length} table(s) WITHOUT Row Level Security: ${names}. `
+          + `Fix: ALTER TABLE public.<name> ENABLE ROW LEVEL SECURITY;`,
+      });
     }
   } catch {
     checks.push({ name: 'rls', status: 'warn', message: 'Could not check RLS status' });
