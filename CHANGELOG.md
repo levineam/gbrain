@@ -2,14 +2,14 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.19.0] - 2026-04-23
+## [0.20.0] - 2026-04-23
 
 ## **BrainBench moves out. gbrain gets its install surface back.**
 ## **The eval harness + 5MB fictional corpus now live in a sibling repo; gbrain exposes a clean public API they consume.**
 
 BrainBench is gbrain's benchmark harness — 10/12 Cats, 4-adapter scorecard, 418-item fictional corpus, 314 tests. Previously it lived inside this repo. Every `bun install` pulled down the eval tree, `docs/benchmarks/*.md` reports, `pdf-parse` devDep, and auxiliary test fixtures whether or not you ever ran a benchmark. For the 99% of gbrain users who want a knowledge-brain CLI, that's ~5MB of noise.
 
-v0.19 moves BrainBench to [github.com/garrytan/gbrain-evals](https://github.com/garrytan/gbrain-evals). gbrain stays the knowledge-brain CLI + library. `gbrain-evals` depends on gbrain via GitHub URL and consumes it through the public exports map. Same benchmarks, same scorecards, same Cat runners, same 418-item fictional amara-life corpus — just a separate install. Folks who don't care about evals never download them. Folks who do clone one extra repo.
+v0.20 moves BrainBench to [github.com/garrytan/gbrain-evals](https://github.com/garrytan/gbrain-evals). gbrain stays the knowledge-brain CLI + library. `gbrain-evals` depends on gbrain via GitHub URL and consumes it through the public exports map. Same benchmarks, same scorecards, same Cat runners, same 418-item fictional amara-life corpus — just a separate install. Folks who don't care about evals never download them. Folks who do clone one extra repo.
 
 The clean separation also gives gbrain a first real public API surface. `package.json` adds 11 new subpath exports — `gbrain/engine`, `gbrain/pglite-engine`, `gbrain/search/hybrid`, `gbrain/link-extraction`, `gbrain/extract`, and so on — covering every gbrain internal the eval harness reaches into. Third-party tools (not just BrainBench) now have a stable contract to consume. Removing any of these exports is a breaking change going forward.
 
@@ -52,7 +52,7 @@ If you're a third-party library author importing gbrain internals: the new expor
 
 **Tests:** 1717 gbrain tests pass, 0 failures, 174 skipped (E2E requiring `DATABASE_URL`). Full eval suite (314 tests) moves with `gbrain-evals` and runs from there.
 
-### To take advantage of v0.19
+### To take advantage of v0.20
 
 For gbrain users:
 1. `gbrain upgrade` — no action required. The extraction is transparent.

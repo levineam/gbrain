@@ -144,7 +144,7 @@ strict behavior when unset.
 - `src/commands/report.ts` — Structured report saver (audit trail for maintenance/enrichment)
 - `openclaw.plugin.json` — ClawHub bundle plugin manifest
 
-### BrainBench — in a sibling repo (v0.19+)
+### BrainBench — in a sibling repo (v0.20+)
 
 BrainBench — the public benchmark for personal-knowledge agent stacks — lives in
 [github.com/garrytan/gbrain-evals](https://github.com/garrytan/gbrain-evals). It
