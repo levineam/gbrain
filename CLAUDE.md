@@ -181,8 +181,12 @@ Key commands added in v0.14.2:
 
 Key commands added in v1.0.0 (OAuth 2.1 + HTTP server + admin dashboard):
 - `gbrain serve --http [--port 3131] [--token-ttl 3600] [--enable-dcr]` — HTTP MCP server with OAuth 2.1, admin dashboard at `/admin`, SSE activity feed at `/admin/events`, health check at `/health`. Prints admin bootstrap token on first start. Alongside (not replacing) stdio `gbrain serve`.
-- **OAuth client registration** — via the `/admin` dashboard (Register client modal → credential reveal with Copy + Download JSON) or programmatically via `oauthProvider.registerClientManual(name, grantTypes, scopes, redirectUris)`. `--enable-dcr` on `serve --http` opens the `/register` endpoint for RFC 7591 self-service registration (off by default). There is no `gbrain auth register-client` CLI subcommand in v1.0.0 — registration goes through the dashboard or the SDK.
-- `bun run src/commands/auth.ts create|list|revoke|test` — legacy bearer tokens still work and grandfather to `read+write+admin` scopes on the OAuth server. No migration required to keep pre-v1.0 clients working.
+- **OAuth client registration** — three paths:
+  1. CLI: `gbrain auth register-client <name> --grant-types <types> --scopes <scopes>` (wired into `src/commands/auth.ts` as a thin wrapper over `GBrainOAuthProvider.registerClientManual`). Default grant types: `client_credentials`. Default scopes: `read`.
+  2. Admin dashboard: Register client modal → credential reveal with Copy + Download JSON.
+  3. SDK: `oauthProvider.registerClientManual(name, grantTypes, scopes, redirectUris)` for programmatic wrappers.
+  `--enable-dcr` on `serve --http` opens the `/register` endpoint for RFC 7591 self-service registration (off by default).
+- `gbrain auth create|list|revoke|test` — legacy bearer tokens still work and grandfather to `read+write+admin` scopes on the OAuth server. `auth` is wired as a first-class `gbrain` subcommand in v1.0.0 (previously only invokable via `bun run src/commands/auth.ts`). No migration required to keep pre-v1.0 clients working.
 
 Key commands added in v0.14.3 (fix wave):
 - `gbrain doctor --index-audit` — opt-in Postgres-only check reporting zero-scan indexes from `pg_stat_user_indexes`. Informational only; never auto-drops.

@@ -86,6 +86,14 @@ Register clients from the **`/admin` dashboard**:
    `client_secret` for confidential clients) once. Copy or Download JSON
    immediately — secrets are hashed on storage and never shown again.
 
+Or from the CLI — faster for scripting:
+
+```bash
+gbrain auth register-client perplexity \
+  --grant-types client_credentials \
+  --scopes "read write"
+```
+
 Host-repo wrappers can register programmatically:
 
 ```ts

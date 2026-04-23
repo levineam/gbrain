@@ -585,9 +585,12 @@ ADMIN
   gbrain serve                          MCP server (stdio)
   gbrain serve --http [--port 3131]     HTTP MCP server with OAuth 2.1 + admin dashboard
                                         [--token-ttl 3600] [--enable-dcr]
-  bun run src/commands/auth.ts          Legacy bearer token management (create/list/revoke/test)
-  # OAuth 2.1 clients: register from the /admin dashboard or via
-  # oauthProvider.registerClientManual() for host-repo wrappers.
+  gbrain auth create|list|revoke|test   Legacy bearer token management
+  gbrain auth register-client <name>    Register an OAuth 2.1 client
+        --grant-types client_credentials,authorization_code
+        --scopes "read write admin"
+  # OAuth 2.1 clients can also be registered from the /admin dashboard or
+  # programmatically via oauthProvider.registerClientManual() for host-repo wrappers.
   gbrain integrations                   Integration recipe dashboard
   gbrain check-backlinks check|fix      Back-link enforcement
   gbrain lint [--fix]                   LLM artifact detection

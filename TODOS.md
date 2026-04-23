@@ -167,19 +167,6 @@ board" — likely an advisor-role page prior plus verb-pattern combinations.
 
 **Depends on:** PGLite engine shipping (to have a real use case for the PR).
 
-### ChatGPT MCP support (OAuth 2.1)
-**What:** Add OAuth 2.1 with Dynamic Client Registration to the self-hosted MCP server so ChatGPT can connect.
-
-**Why:** ChatGPT requires OAuth 2.1 for MCP connectors. Bearer token auth is NOT supported. This is the only major AI client that can't use GBrain remotely.
-
-**Pros:** Completes the "every AI client" promise. ChatGPT has the largest user base.
-
-**Cons:** OAuth 2.1 is a significant implementation: authorization endpoint, token endpoint, PKCE flow, dynamic client registration. Estimated CC: ~3-4 hours.
-
-**Context:** Discovered during DX review (2026-04-10). All other clients (Claude Desktop/Code/Cowork, Perplexity) work with bearer tokens. The Edge Function deployment was removed in v0.8.0. OAuth needs to be added to the self-hosted HTTP MCP server (or `gbrain serve --http` when implemented).
-
-**Depends on:** `gbrain serve --http` (not yet implemented).
-
 ### Runtime MCP access control
 **What:** Add sender identity checking to MCP operations. Brain ops return filtered data based on access tier (Full/Work/Family/None).
 
@@ -418,6 +405,9 @@ board" — likely an advisor-role page prior plus verb-pattern combinations.
 **Depends on:** Nothing.
 
 ## Completed
+
+### ChatGPT MCP support (OAuth 2.1)
+**Completed:** v1.0.0.0 (2026-04-22) — `gbrain serve --http` ships full OAuth 2.1 via MCP SDK's `mcpAuthRouter` + `OAuthServerProvider`. Authorization code flow with PKCE unblocks ChatGPT. Client credentials flow unblocks Perplexity/Claude. Dynamic Client Registration available behind `--enable-dcr` flag (off by default). See `docs/mcp/CHATGPT.md` for connector setup. Closed the P0 that had been blocking the "every AI client" promise since v0.6.
 
 ### Implement AWS Signature V4 for S3 storage backend
 **Completed:** v0.6.0 (2026-04-10) — replaced with @aws-sdk/client-s3 for proper SigV4 signing.
