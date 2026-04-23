@@ -31,7 +31,13 @@ start here.
 1. `./AGENTS.md` (this file) — install + operating protocol.
 2. [`./CLAUDE.md`](./CLAUDE.md) — architecture reference, key files, trust boundaries,
    test layout.
-3. [`./skills/RESOLVER.md`](./skills/RESOLVER.md) — skill dispatcher. Read before any task.
+3. [`./docs/architecture/brains-and-sources.md`](./docs/architecture/brains-and-sources.md)
+   — the two-axis mental model (brain = which DB, source = which repo in the DB). Every
+   query routes on both axes. Read before writing anything that touches brain ops.
+4. [`./skills/conventions/brain-routing.md`](./skills/conventions/brain-routing.md) —
+   agent-facing decision table: when to switch brain, when to switch source, how
+   cross-brain federation works (latent-space only; the agent decides).
+5. [`./skills/RESOLVER.md`](./skills/RESOLVER.md) — skill dispatcher. Read before any task.
 
 ## Trust boundary (critical)
 
@@ -85,6 +91,24 @@ engines: PGLite (embedded Postgres via WASM, zero-config default) or Postgres + 
 suggests Supabase for 1000+ files. GStack teaches agents how to code. GBrain teaches
 agents everything else: brain ops, signal detection, content ingestion, enrichment,
 cron scheduling, reports, identity, and access control.
+
+## Two organizational axes (read this first)
+
+GBrain knowledge is organized along two orthogonal axes. Users AND agents must
+understand both, or queries misroute silently.
+
+- **Brain** — WHICH DATABASE. Your personal brain is `host`. You can mount
+  additional brains (team-published, each with their own DB and access policy)
+  via `gbrain mounts add` (v0.19+). Routing: `--brain`, `GBRAIN_BRAIN_ID`,
+  `.gbrain-mount` dotfile.
+- **Source** — WHICH REPO INSIDE THE DATABASE. A brain can hold many sources
+  (wiki, gstack, openclaw, essays). Slugs scope per source. Routing:
+  `--source`, `GBRAIN_SOURCE`, `.gbrain-source` dotfile.
+
+Both axes follow the same 6-tier resolution pattern. Read
+`docs/architecture/brains-and-sources.md` for topology diagrams (personal, team
+mount, CEO-class with multiple team brains) and
+`skills/conventions/brain-routing.md` for the agent-facing decision table.
 
 ## Architecture
 
@@ -1112,6 +1136,7 @@ When multiple skills could match:
 These apply to ALL brain-writing skills:
 - `skills/conventions/quality.md` — citations, back-links, notability gate
 - `skills/conventions/brain-first.md` — check brain before external APIs
+- `skills/conventions/brain-routing.md` — which brain (DB) and which source (repo) to target; cross-brain federation is latent-space only
 - `skills/conventions/subagent-routing.md` — when to use Minions vs inline work
 - `skills/_brain-filing-rules.md` — where files go
 - `skills/_output-rules.md` — output quality standards

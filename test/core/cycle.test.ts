@@ -135,11 +135,11 @@ beforeAll(async () => {
   sharedEngine = new PGLiteEngine();
   await sharedEngine.connect({});
   await sharedEngine.initSchema();
-});
+}, 30_000); // 21-migration init needs breathing room under full-suite load
 
 afterAll(async () => {
-  await sharedEngine.disconnect();
-});
+  if (sharedEngine) await sharedEngine.disconnect();
+}, 15_000);
 
 beforeEach(() => {
   lintCalls = [];

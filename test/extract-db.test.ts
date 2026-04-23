@@ -19,11 +19,11 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
-});
+}, 30_000); // 21-migration init needs breathing room under full-suite load
 
 afterAll(async () => {
-  await engine.disconnect();
-});
+  if (engine) await engine.disconnect();
+}, 15_000);
 
 async function truncateAll() {
   for (const t of ['content_chunks', 'links', 'tags', 'raw_data', 'timeline_entries', 'page_versions', 'ingest_log', 'pages']) {

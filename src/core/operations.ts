@@ -201,6 +201,24 @@ export interface OperationContext {
    * background work.
    */
   cliOpts?: { quiet: boolean; progressJson: boolean; progressInterval: number };
+  /**
+   * Connected-gbrains brain id (v0.19+). Identifies which brain this op is
+   * targeting. 'host' for the default brain configured in ~/.gbrain/config.json;
+   * otherwise a mount id registered in ~/.gbrain/mounts.json.
+   *
+   * `ctx.engine` is the resolved BrainEngine for this id (populated by
+   * BrainRegistry at dispatch time). `brainId` exists alongside for:
+   * - audit logging (mount-ops JSONL carries the id)
+   * - subagent inheritance (child jobs receive the parent's brainId)
+   * - cross-brain citation prefixes in agent output
+   *
+   * Orthogonal to v0.18.0's source_id, which scopes per-repo WITHIN a brain.
+   * See docs/architecture/brains-and-sources.md for the mental model.
+   *
+   * Omitted = 'host' (pre-v0.19 callers + single-brain deployments keep
+   * working without change).
+   */
+  brainId?: string;
 }
 
 export interface Operation {

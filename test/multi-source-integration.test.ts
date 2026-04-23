@@ -27,11 +27,11 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({ type: 'pglite' } as never);
   await engine.initSchema();
-});
+}, 30_000); // 21-migration init needs breathing room under full-suite load
 
 afterAll(async () => {
-  await engine.disconnect();
-});
+  if (engine) await engine.disconnect();
+}, 15_000);
 
 describe('v0.18.0 — sources table seeded with default row on fresh PGLite', () => {
   test("sources('default') exists after initSchema + migration", async () => {

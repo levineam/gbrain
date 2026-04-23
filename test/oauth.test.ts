@@ -26,11 +26,11 @@ beforeAll(async () => {
   };
 
   provider = new GBrainOAuthProvider({ sql, tokenTtl: 60, refreshTtl: 300 });
-});
+}, 30_000); // PGLITE_SCHEMA_SQL execution under full-suite load can exceed default 5s
 
 afterAll(async () => {
-  await db.close();
-});
+  if (db) await db.close();
+}, 15_000);
 
 // ---------------------------------------------------------------------------
 // hashToken + generateToken utilities
