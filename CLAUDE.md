@@ -43,6 +43,8 @@ strict behavior when unset.
 - `src/commands/eval.ts` — `gbrain eval` command: single-run table + A/B config comparison
 - `src/core/embedding.ts` — OpenAI text-embedding-3-large, batch, retry, backoff
 - `src/core/check-resolvable.ts` — Resolver validation: reachability, MECE overlap, DRY checks, structured fix objects. v0.14.1: `CROSS_CUTTING_PATTERNS.conventions` is an array (notability gate accepts both `conventions/quality.md` and `_brain-filing-rules.md`). New `extractDelegationTargets()` parses `> **Convention:**`, `> **Filing rule:**`, and inline backtick references. DRY suppression is proximity-based via `DRY_PROXIMITY_LINES = 40`.
+- `src/core/repo-root.ts` — Shared `findRepoRoot(startDir?)` (v0.16.4): walks up from `startDir` (default `process.cwd()`) looking for `skills/RESOLVER.md`. Zero-dependency module imported by both `doctor.ts` and `check-resolvable.ts`. Parameterized `startDir` makes tests hermetic.
+- `src/commands/check-resolvable.ts` — Standalone CLI wrapper (v0.16.4) over `checkResolvable()`. Exports `parseFlags`, `resolveSkillsDir`, `DEFERRED`, `runCheckResolvable`. Exit rule: **1 on any issue (warnings OR errors)**, stricter than doctor's `ok` flag — honors README:259. Stable JSON envelope `{ok, skillsDir, report, autoFix, deferred, error, message}` — same shape on success and error paths. `--fix` path runs `autoFixDryViolations` BEFORE `checkResolvable` (same ordering as doctor). `deferred[]` array surfaces pending Checks 5 (trigger routing eval) and 6 (brain filing) with issue URLs. `scripts/skillify-check.ts` subprocess-calls `gbrain check-resolvable --json` (cached per process) and fails loud on binary-missing — no silent false-pass.
 - `src/core/dry-fix.ts` — `gbrain doctor --fix` engine. `autoFixDryViolations(fixes, {dryRun})` rewrites inlined rules to `> **Convention:** see [path](path).` callouts via three shape-aware expanders (bullet / blockquote / paragraph). Five guards: working-tree-dirty (`getWorkingTreeStatus()` returns 3-state `'clean' | 'dirty' | 'not_a_repo'`), no-git-backup, inside-code-fence, already-delegated (40-line proximity, consistent with detector), ambiguous-multi-match, block-is-callout. `execFileSync` array args (no shell — no injection surface). EOF newline preserved.
 - `src/core/backoff.ts` — Adaptive load-aware throttling: CPU/memory checks, exponential backoff, active hours multiplier
 - `src/core/fail-improve.ts` — Deterministic-first, LLM-fallback loop with JSONL failure logging and auto-test generation
@@ -84,6 +86,8 @@ strict behavior when unset.
 - `src/core/migrate.ts` — schema-migration runner. Owns the `MIGRATIONS` array (source of truth for schema DDL). v0.14.2 extended the `Migration` interface with `sqlFor?: { postgres?, pglite? }` (engine-specific SQL overrides `sql`) and `transaction?: boolean` (set to false for `CREATE INDEX CONCURRENTLY`, which Postgres refuses inside a transaction; ignored on PGLite since it has no concurrent writers). Migration v14 (fix wave) uses a handler branching on `engine.kind` to run CONCURRENTLY on Postgres (with a pre-drop of any invalid remnant via `pg_index.indisvalid`) and plain `CREATE INDEX` on PGLite. v15 bumps `minion_jobs.max_stalled` default 1→5 and backfills existing non-terminal rows.
 - `src/core/progress.ts` — Shared bulk-action progress reporter. Writes to stderr. Modes: `auto` (TTY: `\r`-rewriting; non-TTY: plain lines), `human`, `json` (JSONL), `quiet`. Rate-gated by `minIntervalMs` and `minItems`. `startHeartbeat(reporter, note)` helper for single long queries. `child()` composes phase paths. Singleton SIGINT/SIGTERM coordinator emits `abort` events for every live phase. EPIPE defense on both sync throws and stream `'error'` events. Zero dependencies. Introduced in v0.15.2.
 - `src/core/cli-options.ts` — Global CLI flag parser. `parseGlobalFlags(argv)` returns `{cliOpts, rest}` with `--quiet` / `--progress-json` / `--progress-interval=<ms>` stripped. `getCliOptions()` / `setCliOptions()` expose a module-level singleton so commands reach the resolved flags without parameter threading. `cliOptsToProgressOptions()` maps to reporter options. `childGlobalFlags()` returns the flag suffix to append to `execSync('gbrain ...')` calls in migration orchestrators. `OperationContext.cliOpts` extends shared-op dispatch for MCP callers.
+- `src/core/cycle.ts` — v0.17 brain maintenance cycle primitive. `runCycle(engine: BrainEngine | null, opts: CycleOpts): Promise<CycleReport>` composes 6 phases in semantically-driven order (lint → backlinks → sync → extract → embed → orphans). Three callers: `gbrain dream` CLI, `gbrain autopilot` daemon's inline path, and the Minions `autopilot-cycle` handler (`src/commands/jobs.ts`). One source of truth for what the brain does overnight. Coordination via `gbrain_cycle_locks` DB table (TTL-based; works through PgBouncer transaction pooling, unlike session-scoped `pg_try_advisory_lock`) + `~/.gbrain/cycle.lock` file lock with PID-liveness for PGLite / engine=null mode. `CycleReport.schema_version: "1"` is the stable agent-consumable shape. `PhaseResult.error: { class, code, message, hint?, docs_url? }` is Stripe-API-tier structured failure info. `yieldBetweenPhases` hook awaited between every phase — Minions handler uses this to renew its job lock and prevent v0.14 stall-death regression. Engine nullable: filesystem phases (lint, backlinks) run without DB; DB phases skip with `status: "skipped", reason: "no_database"`. Lock-skip: read-only phase selections (`--phase orphans`) bypass the cycle lock.
+- `src/commands/dream.ts` — v0.17 `gbrain dream` CLI. ~80-line thin alias over `runCycle`. brainDir resolution requires explicit `--dir` OR `sync.repo_path` config (no more walk-up-cwd-for-.git footgun). Flags: `--dry-run`, `--json`, `--phase <name>`, `--pull`, `--dir <path>`. Exit code 1 on status=failed (partial/warn not fatal — don't page on warnings).
 - `scripts/check-progress-to-stdout.sh` — CI guard against regressing to `\r`-on-stdout progress. Wired into `bun run test` via `scripts/check-progress-to-stdout.sh && bun test` in package.json.
 - `docs/progress-events.md` — Canonical JSON event schema reference. Stable from v0.15.2, additive only.
 - `src/core/markdown.ts` — Frontmatter parsing + body splitter. `splitBody` requires an explicit timeline sentinel (`<!-- timeline -->`, `--- timeline ---`, or `---` immediately before `## Timeline`/`## History`). Plain `---` in body text is a markdown horizontal rule, not a separator. `inferType` auto-types `/wiki/analysis/` → analysis, `/wiki/guides/` → guide, `/wiki/hardware/` → hardware, `/wiki/architecture/` → architecture, `/writing/` → writing (plus the existing people/companies/deals/etc heuristics).
@@ -591,6 +595,59 @@ stranger?" If yes, replace with generic placeholders.
 GitHub, etc.) are fine — they're public entities, not contacts in anyone's brain.
 Do not confuse illustrative API examples with queries that reveal real
 relationships.
+
+## Responsible-disclosure rule: don't broadcast attack surface in release notes
+
+**When a release fixes a security gap or a user-impacting bug, describe the fix
+functionally. Do not enumerate the attack surface, quantify the exposure window,
+or highlight the most sensitive records by name in public-facing artifacts.**
+
+Public-facing artifacts include: `CHANGELOG.md`, `README.md`, `docs/`, PR titles
+and bodies, commit messages, GitHub issue titles and comments, release pages,
+tweets, blog posts.
+
+**Don't write:**
+- "10 tables were publicly readable by the anon key for months, including X, Y, Z"
+- "X and Y are the most sensitive ones"
+- "N tables exposed. Fix: enable RLS on these specific tables: ..."
+
+**Do write:**
+- "Security hardening pass. Fresh installs secure by default. Existing brains
+  brought to the same bar automatically on upgrade."
+- "If `gbrain doctor` still flags anything after upgrade, the message names each
+  table and gives the exact fix."
+
+Why: anyone reading the release page before they've upgraded now has a directed
+probe list for unpatched installs. The source code ships the specifics anyway
+(`src/schema.sql`, `src/core/migrate.ts`, test fixtures) — reverse engineers can
+get them. But the release page is a broadcast channel. Don't hand attackers a
+curated list with a banner.
+
+**The test:** if a reader with no prior context could read the release note and
+walk away knowing "gbrain at version X has table Y readable by anon key until
+they patch," the note is too specific. Rewrite until that's no longer possible.
+
+**What IS fine in public artifacts:**
+- The mechanism of the fix ("the check now scans every public table instead of
+  a hardcoded allowlist").
+- User-facing operator ergonomics (the escape-hatch SQL template, the upgrade
+  commands, the breaking-change flag).
+- Credit to contributors.
+- Generic framing of severity ("security posture tightening pass") without
+  quantification.
+
+**What stays in private artifacts (plan files, private memories, internal docs):**
+- Specific table names, record counts, exposure duration.
+- Which records stand out as highest-risk.
+- Detailed before/after tables in the "numbers that matter" format.
+
+If the CEO/Eng review of a plan produces a detailed exposure table, keep it in
+the plan file under `~/.claude/plans/` or `~/.gstack/projects/`. Don't copy it
+into the CHANGELOG or PR body.
+
+Applies retroactively: if you see a prior CHANGELOG entry naming attack-surface
+specifics, scrub it as a small cleanup commit, the same way a stale Wintermute
+reference gets swept.
 
 ## Schema state tracking
 

@@ -1,5 +1,5 @@
 // Page types
-export type PageType = 'person' | 'company' | 'deal' | 'yc' | 'civic' | 'project' | 'concept' | 'source' | 'media' | 'writing' | 'analysis' | 'guide' | 'hardware' | 'architecture';
+export type PageType = 'person' | 'company' | 'deal' | 'yc' | 'civic' | 'project' | 'concept' | 'source' | 'media' | 'writing' | 'analysis' | 'guide' | 'hardware' | 'architecture' | 'meeting' | 'note';
 
 export interface Page {
   id: number;
@@ -66,6 +66,12 @@ export interface SearchResult {
   chunk_index: number;
   score: number;
   stale: boolean;
+  /**
+   * v0.18.0: the sources.id the page belongs to. Dedup composite-keys
+   * on (source_id, slug) — see src/core/search/dedup.ts. Defaults to
+   * 'default' for pre-v0.17 rows that lacked the column.
+   */
+  source_id?: string;
 }
 
 export interface SearchOpts {

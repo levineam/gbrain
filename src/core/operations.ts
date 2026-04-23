@@ -24,7 +24,8 @@ export type ErrorCode =
   | 'embedding_failed'
   | 'storage_error'
   | 'bucket_not_found'
-  | 'database_error';
+  | 'database_error'
+  | 'permission_denied';
 
 export class OperationError extends Error {
   constructor(
@@ -1289,9 +1290,9 @@ const find_orphans: Operation = {
       description: 'Include auto-generated and pseudo pages (default: false)',
     },
   },
-  handler: async (_ctx, p) => {
+  handler: async (ctx, p) => {
     const { findOrphans } = await import('../commands/orphans.ts');
-    return findOrphans((p.include_pseudo as boolean) || false);
+    return findOrphans(ctx.engine, { includePseudo: (p.include_pseudo as boolean) || false });
   },
   cliHints: { name: 'orphans', hidden: true },
 };
