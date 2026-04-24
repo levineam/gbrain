@@ -385,7 +385,7 @@ export async function importCodeFile(
   engine: BrainEngine,
   relativePath: string,
   content: string,
-  opts: { noEmbed?: boolean } = {},
+  opts: { noEmbed?: boolean; force?: boolean } = {},
 ): Promise<ImportResult> {
   const slug = slugifyCodePath(relativePath);
   const lang = detectCodeLanguage(relativePath) || 'unknown';
@@ -403,7 +403,7 @@ export async function importCodeFile(
     .digest('hex');
 
   const existing = await engine.getPage(slug);
-  if (existing?.content_hash === hash) {
+  if (!opts.force && existing?.content_hash === hash) {
     return { slug, status: 'skipped', chunks: 0 };
   }
 

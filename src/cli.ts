@@ -19,7 +19,7 @@ for (const op of operations) {
 }
 
 // CLI-only commands that bypass the operation layer
-const CLI_ONLY = new Set(['init', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'features', 'autopilot', 'graph-query', 'jobs', 'agent', 'apply-migrations', 'skillpack-check', 'resolvers', 'integrity', 'repair-jsonb', 'orphans', 'sources', 'dream', 'check-resolvable', 'repos', 'code-def', 'code-refs']);
+const CLI_ONLY = new Set(['init', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'features', 'autopilot', 'graph-query', 'jobs', 'agent', 'apply-migrations', 'skillpack-check', 'resolvers', 'integrity', 'repair-jsonb', 'orphans', 'sources', 'dream', 'check-resolvable', 'repos', 'code-def', 'code-refs', 'reindex-code']);
 
 async function main() {
   // Parse global flags (--quiet / --progress-json / --progress-interval)
@@ -494,6 +494,14 @@ async function handleCliOnly(command: string, args: string[]) {
       case 'code-refs': {
         const { runCodeRefs } = await import('./commands/code-refs.ts');
         await runCodeRefs(engine, args);
+        break;
+      }
+      case 'reindex-code': {
+        // v0.20.0 Cathedral II Layer 13 (E2): explicit code-page reindex
+        // for users upgrading from v0.19.0. Cost-preview gated; TTY prompt
+        // or ConfirmationRequired envelope for non-TTY/JSON callers.
+        const { runReindexCodeCli } = await import('./commands/reindex-code.ts');
+        await runReindexCodeCli(engine, args);
         break;
       }
       case 'repos': {
