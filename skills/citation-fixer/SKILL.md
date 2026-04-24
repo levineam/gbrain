@@ -8,6 +8,8 @@ triggers:
   - "fix citations"
   - "citation audit"
   - "check citations"
+  - "citations are broken"
+  - "fix broken citations"
 tools:
   - search
   - get_page
