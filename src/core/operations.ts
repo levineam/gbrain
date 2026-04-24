@@ -581,6 +581,9 @@ const query: Operation = {
     offset: { type: 'number', description: 'Skip first N results (for pagination)' },
     expand: { type: 'boolean', description: 'Enable multi-query expansion (default: true)' },
     detail: { type: 'string', description: 'Result detail level: low (compiled truth only), medium (default, all with dedup), high (all chunks)' },
+    // v0.20.0 Cathedral II Layer 10 C1/C2: language + symbol-kind filters.
+    lang: { type: 'string', description: 'Filter to chunks where content_chunks.language matches (e.g., typescript, python, ruby)' },
+    symbol_kind: { type: 'string', description: 'Filter to chunks where content_chunks.symbol_type matches (e.g., function, class, method, type, interface)' },
   },
   handler: async (ctx, p) => {
     const expand = p.expand !== false;
@@ -591,6 +594,8 @@ const query: Operation = {
       expansion: expand,
       expandFn: expand ? expandQuery : undefined,
       detail,
+      language: (p.lang as string) || undefined,
+      symbolKind: (p.symbol_kind as string) || undefined,
     });
   },
   cliHints: { name: 'query', positional: ['query'] },

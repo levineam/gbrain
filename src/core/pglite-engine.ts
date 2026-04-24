@@ -239,6 +239,18 @@ export class PGLiteEngine implements BrainEngine {
     // Fetch 3x to give dedup headroom, then page-dedup + re-limit.
     const innerLimit = Math.min(limit * 3, MAX_SEARCH_LIMIT * 3);
 
+    // v0.20.0 Cathedral II Layer 10 C1/C2: language + symbol-kind filters.
+    const params: unknown[] = [query, innerLimit, limit, offset];
+    let extraFilter = '';
+    if (opts?.language) {
+      params.push(opts.language);
+      extraFilter += ` AND cc.language = $${params.length}`;
+    }
+    if (opts?.symbolKind) {
+      params.push(opts.symbolKind);
+      extraFilter += ` AND cc.symbol_type = $${params.length}`;
+    }
+
     const { rows } = await this.db.query(
       `WITH ranked AS (
          SELECT
@@ -250,7 +262,7 @@ export class PGLiteEngine implements BrainEngine {
            ) THEN true ELSE false END AS stale
          FROM content_chunks cc
          JOIN pages p ON p.id = cc.page_id
-         WHERE cc.search_vector @@ websearch_to_tsquery('english', $1) ${detailFilter}
+         WHERE cc.search_vector @@ websearch_to_tsquery('english', $1) ${detailFilter}${extraFilter}
          ORDER BY score DESC
          LIMIT $2
        ),
@@ -262,7 +274,7 @@ export class PGLiteEngine implements BrainEngine {
        SELECT * FROM best_per_page
        ORDER BY score DESC
        LIMIT $3 OFFSET $4`,
-      [query, innerLimit, limit, offset]
+      params
     );
 
     return (rows as Record<string, unknown>[]).map(rowToSearchResult);
@@ -289,6 +301,17 @@ export class PGLiteEngine implements BrainEngine {
       console.warn(`[gbrain] Warning: search limit clamped from ${opts.limit} to ${MAX_SEARCH_LIMIT}`);
     }
 
+    const params: unknown[] = [query, limit, offset];
+    let extraFilter = '';
+    if (opts?.language) {
+      params.push(opts.language);
+      extraFilter += ` AND cc.language = $${params.length}`;
+    }
+    if (opts?.symbolKind) {
+      params.push(opts.symbolKind);
+      extraFilter += ` AND cc.symbol_type = $${params.length}`;
+    }
+
     const { rows } = await this.db.query(
       `SELECT
          p.slug, p.id as page_id, p.title, p.type, p.source_id,
@@ -299,10 +322,10 @@ export class PGLiteEngine implements BrainEngine {
          ) THEN true ELSE false END AS stale
        FROM content_chunks cc
        JOIN pages p ON p.id = cc.page_id
-       WHERE cc.search_vector @@ websearch_to_tsquery('english', $1) ${detailFilter}
+       WHERE cc.search_vector @@ websearch_to_tsquery('english', $1) ${detailFilter}${extraFilter}
        ORDER BY score DESC
        LIMIT $2 OFFSET $3`,
-      [query, limit, offset]
+      params
     );
 
     return (rows as Record<string, unknown>[]).map(rowToSearchResult);
@@ -318,6 +341,17 @@ export class PGLiteEngine implements BrainEngine {
       console.warn(`[gbrain] Warning: search limit clamped from ${opts.limit} to ${MAX_SEARCH_LIMIT}`);
     }
 
+    const params: unknown[] = [vecStr, limit, offset];
+    let extraFilter = '';
+    if (opts?.language) {
+      params.push(opts.language);
+      extraFilter += ` AND cc.language = $${params.length}`;
+    }
+    if (opts?.symbolKind) {
+      params.push(opts.symbolKind);
+      extraFilter += ` AND cc.symbol_type = $${params.length}`;
+    }
+
     const { rows } = await this.db.query(
       `SELECT
         p.slug, p.id as page_id, p.title, p.type, p.source_id,
@@ -328,11 +362,11 @@ export class PGLiteEngine implements BrainEngine {
         ) THEN true ELSE false END AS stale
       FROM content_chunks cc
       JOIN pages p ON p.id = cc.page_id
-      WHERE cc.embedding IS NOT NULL ${detailFilter}
+      WHERE cc.embedding IS NOT NULL ${detailFilter}${extraFilter}
       ORDER BY cc.embedding <=> $1::vector
       LIMIT $2
       OFFSET $3`,
-      [vecStr, limit, offset]
+      params
     );
 
     return (rows as Record<string, unknown>[]).map(rowToSearchResult);

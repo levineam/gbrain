@@ -223,6 +223,8 @@ export class PostgresEngine implements BrainEngine {
     const offset = opts?.offset || 0;
     const type = opts?.type;
     const excludeSlugs = opts?.exclude_slugs;
+    const language = opts?.language;
+    const symbolKind = opts?.symbolKind;
 
     if (opts?.limit && opts.limit > MAX_SEARCH_LIMIT) {
       console.warn(`[gbrain] Warning: search limit clamped from ${opts.limit} to ${MAX_SEARCH_LIMIT}`);
@@ -261,6 +263,8 @@ export class PostgresEngine implements BrainEngine {
             ${type ? sql`AND p.type = ${type}` : sql``}
             ${excludeSlugs?.length ? sql`AND p.slug != ALL(${excludeSlugs})` : sql``}
             ${detailLow ? sql`AND cc.chunk_source = 'compiled_truth'` : sql``}
+            ${language ? sql`AND cc.language = ${language}` : sql``}
+            ${symbolKind ? sql`AND cc.symbol_type = ${symbolKind}` : sql``}
           ORDER BY score DESC
           LIMIT ${innerLimit}
         ),
@@ -297,6 +301,8 @@ export class PostgresEngine implements BrainEngine {
     const type = opts?.type;
     const excludeSlugs = opts?.exclude_slugs;
     const detailLow = opts?.detail === 'low';
+    const language = opts?.language;
+    const symbolKind = opts?.symbolKind;
 
     if (opts?.limit && opts.limit > MAX_SEARCH_LIMIT) {
       console.warn(`[gbrain] Warning: search limit clamped from ${opts.limit} to ${MAX_SEARCH_LIMIT}`);
@@ -316,6 +322,8 @@ export class PostgresEngine implements BrainEngine {
           ${type ? sql`AND p.type = ${type}` : sql``}
           ${excludeSlugs?.length ? sql`AND p.slug != ALL(${excludeSlugs})` : sql``}
           ${detailLow ? sql`AND cc.chunk_source = 'compiled_truth'` : sql``}
+          ${language ? sql`AND cc.language = ${language}` : sql``}
+          ${symbolKind ? sql`AND cc.symbol_type = ${symbolKind}` : sql``}
         ORDER BY score DESC
         LIMIT ${limit}
         OFFSET ${offset}
@@ -331,6 +339,8 @@ export class PostgresEngine implements BrainEngine {
     const type = opts?.type;
     const excludeSlugs = opts?.exclude_slugs;
     const detailLow = opts?.detail === 'low';
+    const language = opts?.language;
+    const symbolKind = opts?.symbolKind;
 
     if (opts?.limit && opts.limit > MAX_SEARCH_LIMIT) {
       console.warn(`[gbrain] Warning: search limit clamped from ${opts.limit} to ${MAX_SEARCH_LIMIT}`);
@@ -355,6 +365,8 @@ export class PostgresEngine implements BrainEngine {
           ${detailLow ? sql`AND cc.chunk_source = 'compiled_truth'` : sql``}
           ${type ? sql`AND p.type = ${type}` : sql``}
           ${excludeSlugs?.length ? sql`AND p.slug != ALL(${excludeSlugs})` : sql``}
+          ${language ? sql`AND cc.language = ${language}` : sql``}
+          ${symbolKind ? sql`AND cc.symbol_type = ${symbolKind}` : sql``}
         ORDER BY cc.embedding <=> ${vecStr}::vector
         LIMIT ${limit}
         OFFSET ${offset}

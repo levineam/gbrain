@@ -68,7 +68,14 @@ export async function hybridSearch(
 
   // Auto-detect detail level from query intent when caller doesn't specify
   const detail = opts?.detail ?? autoDetectDetail(query);
-  const searchOpts: SearchOpts = { limit: innerLimit, detail };
+  const searchOpts: SearchOpts = {
+    limit: innerLimit,
+    detail,
+    // v0.20.0 Cathedral II Layer 10 — thread language + symbolKind through so
+    // per-engine searchKeyword / searchVector apply the filters at SQL level.
+    language: opts?.language,
+    symbolKind: opts?.symbolKind,
+  };
 
   if (DEBUG && detail) {
     console.error(`[search-debug] auto-detail=${detail} for query="${query}"`);
