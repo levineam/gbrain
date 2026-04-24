@@ -75,10 +75,14 @@ export function resolveGbrainCliPath(): string {
   throw new Error('Could not resolve the gbrain CLI path. Install gbrain so it is on $PATH (e.g. /usr/local/bin/gbrain), or run autopilot from the compiled binary directly.');
 }
 
+export function shouldSpawnAutopilotWorker(args: string[]): boolean {
+  return !args.includes('--no-worker');
+}
+
 export async function runAutopilot(engine: BrainEngine, args: string[]) {
   if (args.includes('--help') || args.includes('-h')) {
     console.log(
-      'Usage: gbrain autopilot [--repo <path>] [--interval N] [--json]\n' +
+      'Usage: gbrain autopilot [--repo <path>] [--interval N] [--json] [--no-worker]\n' +
       '       gbrain autopilot --install [--repo <path>]\n' +
       '       gbrain autopilot --uninstall\n' +
       '       gbrain autopilot --status [--json]\n\n' +
@@ -106,6 +110,7 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
   const baseInterval = parseInt(parseArg(args, '--interval') || '300', 10);
   const jsonMode = args.includes('--json');
   const forceInline = args.includes('--inline');
+  const noWorker = !shouldSpawnAutopilotWorker(args);
 
   if (!repoPath) {
     console.error('No repo path. Use --repo or run gbrain sync --repo first.');
@@ -137,12 +142,13 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
   const cfg = loadConfig();
   const engineType = cfg?.engine ?? 'pglite';
   const useMinionsDispatch = mode !== 'off' && engineType === 'postgres' && !forceInline;
+  const spawnManagedWorker = useMinionsDispatch && !noWorker;
 
   let stopping = false;
   let workerProc: ChildProcess | null = null;
   let crashCount = 0;
 
-  if (useMinionsDispatch) {
+  if (spawnManagedWorker) {
     const cliPath = resolveGbrainCliPath();
     const startWorker = () => {
       const child = spawn(cliPath, ['jobs', 'work'], { stdio: 'inherit', env: process.env });
@@ -161,10 +167,13 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
       });
     };
     startWorker();
-  } else {
-    const why = mode === 'off' ? 'minion_mode=off'
+  } else if (!useMinionsDispatch) {
+    const why = mode === 'off'
+      ? 'minion_mode=off'
       : (engineType !== 'postgres' ? 'engine=pglite' : 'flag=--inline');
     console.log(`[autopilot] running steps inline (${why})`);
+  } else {
+    console.log('[autopilot] --no-worker set: dispatch loop only (worker managed externally)');
   }
 
   // Async shutdown with 35s drain window for the worker child. The worker

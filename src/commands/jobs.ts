@@ -17,6 +17,10 @@ function hasFlag(args: string[], flag: string): boolean {
   return args.includes(flag);
 }
 
+export function resolveWorkerConcurrency(args: string[], env: NodeJS.ProcessEnv = process.env): number {
+  return parseInt(parseFlag(args, '--concurrency') ?? env.GBRAIN_WORKER_CONCURRENCY ?? '1', 10);
+}
+
 function formatJob(job: MinionJob): string {
   const dur = job.finished_at && job.started_at
     ? `${((job.finished_at.getTime() - job.started_at.getTime()) / 1000).toFixed(1)}s`
@@ -467,7 +471,7 @@ HANDLER TYPES (built in)
       }
 
       const queueName = parseFlag(args, '--queue') ?? 'default';
-      const concurrency = parseInt(parseFlag(args, '--concurrency') ?? '1', 10);
+      const concurrency = resolveWorkerConcurrency(args);
 
       try { await queue.ensureSchema(); }
       catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); }
@@ -604,16 +608,17 @@ export async function registerBuiltinHandlers(worker: MinionWorker, engine: Brai
     };
   });
 
-  // Shell handler: registered ONLY when GBRAIN_ALLOW_SHELL_JOBS=1 is set on the
-  // worker process. Default-closed; opt-in per-host. Without the flag, shell
-  // jobs submitted via CLI insert rows but no worker claims them (they sit in
-  // 'waiting' — the CLI prints a starvation warning for that case).
-  if (process.env.GBRAIN_ALLOW_SHELL_JOBS === '1') {
+  // Shell handler is always registered. Runtime env guard lives inside the
+  // handler so claimed jobs emit a clear rejection log on workers missing
+  // GBRAIN_ALLOW_SHELL_JOBS=1.
+  {
     const { shellHandler } = await import('../core/minions/handlers/shell.ts');
     worker.register('shell', shellHandler);
-    process.stderr.write('[minion worker] shell handler enabled (GBRAIN_ALLOW_SHELL_JOBS=1)\n');
-  } else {
-    process.stderr.write('[minion worker] shell handler disabled (set GBRAIN_ALLOW_SHELL_JOBS=1 to enable)\n');
+    if (process.env.GBRAIN_ALLOW_SHELL_JOBS === '1') {
+      process.stderr.write('[minion worker] shell handler enabled (GBRAIN_ALLOW_SHELL_JOBS=1)\n');
+    } else {
+      process.stderr.write('[minion worker] shell handler registered in guarded mode (set GBRAIN_ALLOW_SHELL_JOBS=1 to execute shell jobs)\n');
+    }
   }
 
   // v0.15 subagent handlers: always-on. Unlike shell (which needs an env
