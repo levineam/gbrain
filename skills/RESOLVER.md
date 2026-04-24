@@ -13,11 +13,11 @@ This is the dispatcher. Skills are the implementation. **Read the skill file bef
 
 | Trigger | Skill |
 |---------|-------|
-| "What do we know about", "tell me about", "search for" | `skills/query/SKILL.md` |
+| "What do we know about", "tell me about", "search for", "search the brain", "brain search", "background on", "notes on this", "who is" | `skills/query/SKILL.md` |
 | "Who knows who", "relationship between", "connections", "graph query" | `skills/query/SKILL.md` (use graph-query) |
 | Creating/enriching a person or company page | `skills/enrich/SKILL.md` |
 | Where does a new file go? Filing rules | `skills/repo-architecture/SKILL.md` |
-| Fix broken citations in brain pages | `skills/citation-fixer/SKILL.md` |
+| "Fix broken citations", "citations are broken", "fix citations", "citation audit" | `skills/citation-fixer/SKILL.md` |
 | "Research", "track", "extract from email", "investor updates", "donations" | `skills/data-research/SKILL.md` |
 | Share a brain page as a link | `skills/publish/SKILL.md` |
 
@@ -89,8 +89,10 @@ When multiple skills could match:
 1. Prefer the most specific skill (meeting-ingestion over ingest)
 2. If the user mentions a URL, route by content type (link → idea-ingest, video → media-ingest)
 3. If the user mentions a person/company, check if enrich or query fits better
-4. Chaining is explicit in each skill's Phases section
-5. When in doubt, ask the user
+4. **Citation audit** → use `citation-fixer` (targeted fix). `maintain` includes citation checking as one step of a broader health sweep — use `maintain` only for full brain health runs.
+5. **Background task / spawn agent** → use `minion-orchestrator` for spawning and steering agents. `gbrain-jobs` is the lower-level queue CLI.
+6. Chaining is explicit in each skill's Phases section
+7. When in doubt, ask the user
 
 ## Conventions (cross-cutting)
 
