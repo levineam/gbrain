@@ -681,7 +681,11 @@ function sanitize(name: string): string {
 let tiktokenEncoder: { encode: (s: string) => Uint32Array; free: () => void } | null = null;
 let tiktokenInitialized = false;
 
-function estimateTokens(text: string): number {
+// v0.20.0 Cathedral II Layer 8 (D1) — exported so commands/sync.ts can
+// estimate embed cost before a --all sync blows a surprise OpenAI bill.
+// Same cl100k_base tokenizer the embedding path actually uses, so cost
+// estimates match actual billing within tokenizer noise.
+export function estimateTokens(text: string): number {
   if (!text) return 0;
   if (!tiktokenInitialized) {
     try {

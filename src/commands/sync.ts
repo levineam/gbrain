@@ -3,6 +3,8 @@ import { execFileSync } from 'child_process';
 import { join, relative } from 'path';
 import type { BrainEngine } from '../core/engine.ts';
 import { importFile } from '../core/import-file.ts';
+import { readFileSync, statSync, readdirSync } from 'fs';
+import { createInterface } from 'readline';
 import {
   buildSyncManifest,
   isSyncable,
@@ -11,6 +13,9 @@ import {
   unacknowledgedSyncFailures,
   acknowledgeSyncFailures,
 } from '../core/sync.ts';
+import { estimateTokens } from '../core/chunkers/code.ts';
+import { EMBEDDING_MODEL, estimateEmbeddingCostUsd } from '../core/embedding.ts';
+import { errorFor, serializeError } from '../core/errors.ts';
 import type { SyncManifest } from '../core/sync.ts';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
@@ -28,6 +33,107 @@ export interface SyncResult {
   embedded: number;
   pagesAffected: string[];
   failedFiles?: number; // count of parse failures (Bug 9)
+}
+
+/**
+ * v0.20.0 Cathedral II Layer 8 (D1) — walk each source's working tree and
+ * sum tokens for every syncable file. This is a conservative overestimate
+ * (full file content, not just the incremental diff) because `sync --all`
+ * on a source that hasn't been synced yet WILL embed every file in the
+ * working tree. For already-synced sources with only incremental changes,
+ * the overestimate is the ceiling, not the floor — users never get
+ * surprised by MORE cost than the preview claims. The false-high bias is
+ * intentional: a lower estimate that undersells the real bill would be
+ * worse than one that oversells.
+ */
+function estimateSyncAllCost(sources: Array<{ local_path: string | null; config: Record<string, unknown> }>): {
+  totalTokens: number;
+  totalFiles: number;
+  activeSources: number;
+  perSource: Array<{ path: string; tokens: number; files: number }>;
+} {
+  let totalTokens = 0;
+  let totalFiles = 0;
+  let activeSources = 0;
+  const perSource: Array<{ path: string; tokens: number; files: number }> = [];
+
+  for (const src of sources) {
+    if (!src.local_path) continue;
+    const cfg = (src.config || {}) as { syncEnabled?: boolean; strategy?: 'markdown' | 'code' | 'auto' };
+    if (cfg.syncEnabled === false) continue;
+    activeSources++;
+    let sourceTokens = 0;
+    let sourceFiles = 0;
+    try {
+      walkSyncableFiles(src.local_path, (filePath: string, content: string) => {
+        sourceTokens += estimateTokens(content);
+        sourceFiles++;
+      }, cfg.strategy ?? 'markdown');
+    } catch {
+      // Best-effort: a source whose local_path is gone or unreadable just
+      // contributes 0. The sync itself would have failed anyway; no point
+      // blocking the preview on a pre-existing fault.
+    }
+    totalTokens += sourceTokens;
+    totalFiles += sourceFiles;
+    perSource.push({ path: src.local_path, tokens: sourceTokens, files: sourceFiles });
+  }
+
+  return { totalTokens, totalFiles, activeSources, perSource };
+}
+
+/**
+ * Walk a repo's working tree and invoke `cb(path, content)` for each
+ * syncable file. Honors the same strategy as `isSyncable` so the preview
+ * and the real sync agree on what's in scope.
+ */
+function walkSyncableFiles(
+  repoRoot: string,
+  cb: (path: string, content: string) => void,
+  strategy: 'markdown' | 'code' | 'auto',
+): void {
+  const stack: string[] = [repoRoot];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let entries: import('fs').Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true }) as unknown as import('fs').Dirent[];
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const name = typeof entry.name === 'string' ? entry.name : String(entry.name);
+      // Skip hidden dirs, .git, node_modules (same rules isSyncable applies).
+      if (name.startsWith('.') || name === 'node_modules' || name === 'ops') continue;
+      const fullPath = `${dir}/${name}`;
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+      } else if (entry.isFile()) {
+        const relativePath = fullPath.slice(repoRoot.length + 1);
+        if (!isSyncable(relativePath, { strategy })) continue;
+        try {
+          const stat = statSync(fullPath);
+          if (stat.size > 5_000_000) continue; // skip large binaries
+          const content = readFileSync(fullPath, 'utf-8');
+          cb(fullPath, content);
+        } catch {
+          // Ignore files we can't read; consistent with sync's own tolerance.
+        }
+      }
+    }
+  }
+}
+
+/** Interactive [y/N] prompt. Resolves false on non-y answers or EOF. */
+async function promptYesNo(question: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.trim().toLowerCase() === 'y' || answer.trim().toLowerCase() === 'yes');
+    });
+    rl.on('close', () => resolve(false));
+  });
 }
 
 export interface SyncOpts {
@@ -554,6 +660,8 @@ export async function runSync(engine: BrainEngine, args: string[]) {
   const skipFailed = args.includes('--skip-failed');
   const retryFailed = args.includes('--retry-failed');
   const syncAll = args.includes('--all');
+  const jsonOut = args.includes('--json');
+  const yesFlag = args.includes('--yes');
   const strategyArg = args.find((a, i) => args[i - 1] === '--strategy') as SyncOpts['strategy'] | undefined;
 
   // v0.18.0 Step 5: --source resolves to a sources(id) row. Falls back
@@ -583,6 +691,58 @@ export async function runSync(engine: BrainEngine, args: string[]) {
       console.log('No sources with local_path configured. Use `gbrain sources add <id> --path <path>` first.');
       return;
     }
+
+    // v0.20.0 Cathedral II Layer 8 D1 — cost preview + ConfirmationRequired
+    // gate. Before kicking off a multi-source sync that may embed tens of
+    // thousands of chunks (real money), walk the sync-diff set(s), sum
+    // tokens, compute USD estimate, and gate:
+    //   - TTY + !json + !yes → interactive [y/N] prompt
+    //   - non-TTY OR --json OR piped → emit ConfirmationRequired envelope,
+    //     exit 2 (reserve 1 for runtime errors)
+    //   - --yes → skip prompt entirely
+    //   - --dry-run → preview + exit 0
+    // Skipped entirely when --no-embed is set (user already opted out of
+    // the cost and will run `embed --stale` later).
+    if (!noEmbed) {
+      const preview = estimateSyncAllCost(sources);
+      const costUsd = estimateEmbeddingCostUsd(preview.totalTokens);
+      const previewMsg =
+        `sync --all preview: ${preview.totalFiles} files across ${preview.activeSources} source(s), ` +
+        `~${preview.totalTokens.toLocaleString()} tokens, est. $${costUsd.toFixed(2)} on ${EMBEDDING_MODEL}.`;
+
+      if (dryRun) {
+        if (jsonOut) {
+          console.log(JSON.stringify({ status: 'dry_run', preview, costUsd, model: EMBEDDING_MODEL }));
+        } else {
+          console.log(previewMsg);
+          console.log('--dry-run: exit without syncing.');
+        }
+        return;
+      }
+
+      if (!yesFlag) {
+        const isTTY = Boolean(process.stdout.isTTY) && Boolean(process.stdin.isTTY);
+        if (!isTTY || jsonOut) {
+          // Agent-facing path: emit structured envelope, exit 2.
+          const envelope = serializeError(errorFor({
+            class: 'ConfirmationRequired',
+            code: 'cost_preview_requires_yes',
+            message: previewMsg,
+            hint: 'Pass --yes to proceed, or --dry-run to see the preview and exit 0.',
+          }));
+          console.log(JSON.stringify({ error: envelope, preview, costUsd, model: EMBEDDING_MODEL }));
+          process.exit(2);
+        }
+        // Interactive TTY path: prompt [y/N].
+        console.log(previewMsg);
+        const answer = await promptYesNo('Proceed? [y/N] ');
+        if (!answer) {
+          console.log('Cancelled.');
+          return;
+        }
+      }
+    }
+
     for (const src of sources) {
       const cfg = (src.config || {}) as { syncEnabled?: boolean; strategy?: 'markdown' | 'code' | 'auto' };
       if (cfg.syncEnabled === false) {
