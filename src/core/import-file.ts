@@ -297,24 +297,28 @@ export async function importFromContent(
 
     // v0.19.0 E1 — doc↔impl linking: if this markdown page cites code paths
     // (e.g. 'src/core/sync.ts:42'), create bidirectional edges to the code
-    // page. addLink's inner SELECT naturally drops edges to non-existent
-    // pages, so a guide imported before its code repo is synced writes no
-    // edges here — they'll land when importCodeFile runs the reverse scan
-    // (A3 backfill, Layer 6 deferred piece).
+    // page. addLink throws when either endpoint is missing (master tightened
+    // this in v0.18.x), so we wrap each pair in try/catch — guides imported
+    // before their code repo syncs are common, and the missing edges land
+    // later via `gbrain reconcile-links` (Layer 8 D3, v0.21.0).
     const codeRefs = extractCodeRefs(parsed.compiled_truth + '\n' + (parsed.timeline || ''));
     for (const ref of codeRefs) {
       const codeSlug = slugifyCodePath(ref.path);
       // Forward: markdown guide → code page (this guide documents that code)
-      await tx.addLink(
-        slug, codeSlug,
-        ref.line ? `cited at ${ref.path}:${ref.line}` : ref.path,
-        'documents', 'markdown', slug, 'compiled_truth',
-      );
+      try {
+        await tx.addLink(
+          slug, codeSlug,
+          ref.line ? `cited at ${ref.path}:${ref.line}` : ref.path,
+          'documents', 'markdown', slug, 'compiled_truth',
+        );
+      } catch { /* code page not yet imported — reconcile-links will catch it */ }
       // Reverse: code page → markdown guide (this code is documented by the guide)
-      await tx.addLink(
-        codeSlug, slug,
-        ref.path, 'documented_by', 'markdown', slug, 'compiled_truth',
-      );
+      try {
+        await tx.addLink(
+          codeSlug, slug,
+          ref.path, 'documented_by', 'markdown', slug, 'compiled_truth',
+        );
+      } catch { /* same reason — silent skip */ }
     }
   });
 
