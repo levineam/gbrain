@@ -63,11 +63,11 @@ async function seedReflections(engine: PGLiteEngine, count: number): Promise<voi
   for (let i = 0; i < count; i++) {
     const slug = `wiki/personal/reflections/2026-04-${String(15 + i).padStart(2, '0')}-test-pattern-aaa${i}`;
     await engine.putPage(slug, {
-      type: 'default',
+      type: 'note',
       title: `Reflection ${i}`,
       compiled_truth: `Sample reflection content ${i} discussing recurring theme of work-life balance.`,
       timeline: '',
-      frontmatter: { type: 'default', title: `Reflection ${i}` },
+      frontmatter: { type: 'note', title: `Reflection ${i}` },
     });
   }
 }

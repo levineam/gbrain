@@ -53,7 +53,7 @@ describe('E2E allow-list — trusted-workspace path', () => {
     const tool = findPutPageTool(tools);
     await tool.execute(
       { slug: 'wiki/personal/reflections/2026-04-25-arete-paradox-a3f8c1', content: SAMPLE_BODY },
-      { engine, jobId: 7777 },
+      { engine, jobId: 7777, remote: true },
     );
     const page = await engine.getPage('wiki/personal/reflections/2026-04-25-arete-paradox-a3f8c1');
     expect(page).not.toBeNull();
@@ -72,7 +72,7 @@ describe('E2E allow-list — trusted-workspace path', () => {
     try {
       await tool.execute(
         { slug: 'wiki/finance/secret-market-data', content: SAMPLE_BODY },
-        { engine, jobId: 7778 },
+        { engine, jobId: 7778, remote: true },
       );
     } catch (e) {
       threw = true;
@@ -94,7 +94,7 @@ describe('E2E allow-list — trusted-workspace path', () => {
     const tool = findPutPageTool(tools);
     await tool.execute(
       { slug: 'wiki/originals/ideas/2026-04-25-thousand-pound-armor', content: SAMPLE_BODY },
-      { engine, jobId: 7779 },
+      { engine, jobId: 7779, remote: true },
     );
     expect(await engine.getPage('wiki/originals/ideas/2026-04-25-thousand-pound-armor')).not.toBeNull();
   });
@@ -114,7 +114,7 @@ describe('E2E allow-list — legacy namespace fallback', () => {
     try {
       await tool.execute(
         { slug: 'wiki/personal/reflections/2026-04-25-bypass-attempt', content: SAMPLE_BODY },
-        { engine, jobId: 7780 },
+        { engine, jobId: 7780, remote: true },
       );
     } catch (e) {
       threw = true;
@@ -133,7 +133,7 @@ describe('E2E allow-list — legacy namespace fallback', () => {
     const tool = findPutPageTool(tools);
     await tool.execute(
       { slug: 'wiki/agents/999/scratch-note', content: SAMPLE_BODY },
-      { engine, jobId: 7781 },
+      { engine, jobId: 7781, remote: true },
     );
     expect(await engine.getPage('wiki/agents/999/scratch-note')).not.toBeNull();
   });

@@ -377,8 +377,8 @@ describe('runCycle — yieldBetweenPhases hook', () => {
         hookCalls++;
       },
     });
-    // 6 phases → 6 yield calls (one after each).
-    expect(hookCalls).toBe(6);
+    // v0.27: 8 phases → 8 yield calls (one after each).
+    expect(hookCalls).toBe(8);
   });
 
   test('hook exceptions do not abort the cycle', async () => {
@@ -388,7 +388,7 @@ describe('runCycle — yieldBetweenPhases hook', () => {
         throw new Error('synthetic hook error');
       },
     });
-    // Cycle still completed all phases.
-    expect(report.phases.length).toBe(6);
+    // Cycle still completed all phases (v0.27: 8).
+    expect(report.phases.length).toBe(8);
   });
 });
