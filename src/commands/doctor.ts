@@ -649,6 +649,53 @@ export async function runDoctor(engine: BrainEngine | null, args: string[], dbSo
     mbcHb();
   }
 
+  // 11a. Frontmatter integrity (v0.22.4).
+  // scanBrainSources walks every registered source's local_path on disk
+  // (not from the DB), invoking parseMarkdown(..., {validate:true}) per
+  // file. Reports per-source counts grouped by error code. The fix path is
+  // `gbrain frontmatter validate <source-path> --fix`, which writes .bak
+  // backups so it works for both git and non-git brain repos.
+  progress.heartbeat('frontmatter_integrity');
+  const fmHb = startHeartbeat(progress, 'scanning frontmatter…');
+  try {
+    const { scanBrainSources } = await import('../core/brain-writer.ts');
+    const report = await scanBrainSources(engine);
+    if (report.total === 0) {
+      const sources = report.per_source.length;
+      checks.push({
+        name: 'frontmatter_integrity',
+        status: 'ok',
+        message: sources === 0
+          ? 'No registered sources to scan'
+          : `${sources} source(s) clean — no frontmatter issues`,
+      });
+    } else {
+      const sourceMessages: string[] = [];
+      for (const src of report.per_source) {
+        if (src.total === 0) continue;
+        const codes = Object.entries(src.errors_by_code)
+          .map(([k, v]) => `${k}=${v}`)
+          .join(', ');
+        sourceMessages.push(`${src.source_id}: ${src.total} (${codes})`);
+      }
+      checks.push({
+        name: 'frontmatter_integrity',
+        status: 'warn',
+        message:
+          `${report.total} frontmatter issue(s) across ${sourceMessages.length} source(s). ` +
+          `${sourceMessages.join('; ')}. Fix: gbrain frontmatter validate <source-path> --fix`,
+      });
+    }
+  } catch (e) {
+    checks.push({
+      name: 'frontmatter_integrity',
+      status: 'warn',
+      message: `Could not scan frontmatter: ${e instanceof Error ? e.message : String(e)}`,
+    });
+  } finally {
+    fmHb();
+  }
+
   // 11b. Queue health (v0.19.1 queue-resilience wave).
   // Postgres-only because PGLite has no multi-process worker surface. Two
   // subchecks, both cheap (single SELECT each, status-index-covered):
