@@ -2,6 +2,142 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.27.0] - 2026-04-26
+
+**`gbrain dream` now actually dreams. Conversation transcripts become reflections, originals, and 25-year patterns ... overnight.**
+
+The maintenance cycle gains two new phases. Synthesize reads transcripts (OpenClaw session corpus, meeting transcripts, ad-hoc files) and writes brain-native pages: reflections to `wiki/personal/reflections/`, originals to `wiki/originals/ideas/`, timeline entries on existing people pages. Patterns runs after `extract` and surfaces recurring themes ... when ≥3 reflections mention the same motif, a pattern page is written to `wiki/personal/patterns/<theme>` citing every reflection that constitutes its evidence. The phase order is now `lint → backlinks → sync → synthesize → extract → patterns → embed → orphans` ... eight phases, one cron-friendly command.
+
+The motivating story: on 2026-04-25 you read your Stanford-era email archive (4,963 emails, 1999-2001) and the agent had to hand-write the reflection page connecting patterns from age 19 to age 45. The 19-year-old who saved his ICQ logs is the user the system should match. The dream cycle's job is to make the brain a self-enriching memory instead of a manually-curated database.
+
+### The numbers that matter
+
+Real production deployment, default config (Sonnet 4.6 synthesis, Haiku 4.5 verdict, 12-hour cooldown). Reproduce with `gbrain dream --phase synthesize --input <fixture>` against any transcript >2000 chars.
+
+| Metric | Before (v0.20.4) | After (v0.27.0) | Δ |
+|---|---|---|---|
+| Cycle phases | 6 | 8 | +33% |
+| Sources of brain enrichment | 4 (manual, signal, ingest, extract) | 5 (+ overnight synth) | +1 lane |
+| Cost / day under autopilot | $0 | ~$1-2 | bounded by cooldown |
+| Reflections after 30 days | 0 (manual only) | 10-15 (auto) | "the brain dreams" |
+
+The lane that matters: a daily conversation between you and the agent now lands in long-term memory automatically. No manual write-up. Pattern recognition across reflections is one more sonnet call, not a new subsystem.
+
+### What this means for you
+
+Configure `dream.synthesize.session_corpus_dir` once, set `dream.synthesize.enabled true`, and `gbrain dream` (or your existing autopilot install) consolidates yesterday's conversations every overnight pass. Edited transcripts produce new slugs (content-hash suffix) ... never silently overwrite. The synthesize subagent is bounded to an explicit allow-list sourced from `_brain-filing-rules.json`, so even a poisoned transcript can't write to `wiki/finance/secret.md`. `--dry-run` runs the cheap Haiku verdict (cached in `dream_verdicts`) so you can preview without spending real Sonnet tokens.
+
+## To take advantage of v0.27.0
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Configure the synthesize phase if you want overnight conversation synthesis:**
+   ```bash
+   gbrain config set dream.synthesize.session_corpus_dir /path/to/transcripts
+   gbrain config set dream.synthesize.enabled true
+   gbrain dream --phase synthesize --dry-run --json
+   ```
+   Existing autopilot users see no behavior change until this step ... synthesize is opt-in.
+3. **Verify the outcome:**
+   ```bash
+   gbrain doctor                                   # schema_version should match latest
+   gbrain dream --help                             # shows the 8-phase pipeline
+   gbrain dream --phase synthesize --dry-run       # zero Sonnet calls; cheap Haiku verdict only
+   ```
+4. **If any step fails or the numbers look wrong,** please file an issue at https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - contents of `~/.gbrain/upgrade-errors.jsonl` if it exists
+   - which step broke
+
+### Itemized changes
+
+#### Dream cycle: synthesize phase (`src/core/cycle/synthesize.ts`)
+
+- Reads transcripts from `dream.synthesize.session_corpus_dir` (or `--input <file>` ad-hoc).
+- Cheap Haiku verdict per transcript filters routine ops sessions; verdicts cached in the new `dream_verdicts` table keyed by `(file_path, content_hash)` so backfill re-runs skip already-judged transcripts at zero cost.
+- Fan-out: one Sonnet subagent per worth-processing transcript, dispatched with `allowed_slug_prefixes` (read once from `skills/_brain-filing-rules.json`'s `dream_synthesize_paths.globs`).
+- Idempotency key `dream:synth:<file_path>:<content_hash>` ... same content twice is a queue no-op.
+- Slug shape: `wiki/personal/reflections/YYYY-MM-DD-<topic>-<hash[:6]>` and `wiki/originals/ideas/YYYY-MM-DD-<idea>-<hash[:6]>`. Edited transcripts produce new slugs alongside the old; `git log` shows both.
+- Provenance via `subagent_tool_executions` (the orchestrator queries each child's put_page input, NOT `pages.updated_at` ... that would pick up unrelated writes).
+- Orchestrator dual-write: subagent only calls put_page (writes to DB); after children resolve, the phase reverse-renders each new page from DB to disk via `serializeMarkdown`. Subagent never gets fs-write access.
+- Cooldown via `dream.synthesize.last_completion_ts` config key, written ONLY on success. Default 12-hour cooldown caps spend at ~$1-2/day under autopilot. Explicit `--input` / `--date` / `--from` / `--to` invocations bypass cooldown.
+
+#### Dream cycle: patterns phase (`src/core/cycle/patterns.ts`)
+
+- Runs AFTER `extract` (codex finding #7) so the graph state is fresh ... subagent put_page sets `ctx.remote=true` and skips auto-link/timeline by default; extract is the canonical materialization step.
+- Single Sonnet subagent gathers reflections within `dream.patterns.lookback_days` (default 30) and surfaces themes that recur in ≥`dream.patterns.min_evidence` (default 3) distinct reflections.
+- Pattern slug: `wiki/personal/patterns/<theme>` (no date — patterns aggregate across dates). Existing pattern pages are updated in place via the same allow-listed put_page path.
+- Same provenance model as synthesize.
+
+#### Trust boundary: `allowed_slug_prefixes`
+
+- New `OperationContext.allowedSlugPrefixes?: string[]` field. When set on a subagent's put_page call, the slug must match one of the listed prefix globs (e.g. `wiki/personal/reflections/*`) or the call is rejected with `permission_denied`.
+- When unset, the legacy `wiki/agents/<subagentId>/...` namespace check applies unchanged ... v0.15 anti-prompt-injection guarantee preserved (regression-guarded by `test/operations-allow-list.test.ts`).
+- Trust comes from PROTECTED_JOB_NAMES (MCP can't submit `subagent` jobs at all), NOT from `ctx.remote`. The `remote=true` flag flows through every subagent tool call for auto-link safety; using it as the trust signal would null the allow-list for its intended consumer (codex finding #1, caught and corrected pre-merge).
+- Auto-link is re-enabled for trusted-workspace writes so the cycle's extract phase doesn't have to recompute synth-output edges.
+- Allow-list lives in ONE place: `skills/_brain-filing-rules.json`'s `dream_synthesize_paths.globs`. Both the subagent runtime and the maintain skill read from there.
+
+#### Cycle scaffolding (`src/core/cycle.ts`)
+
+- `ALL_PHASES` extends to 8 entries; `gbrain dream --phase synthesize` and `--phase patterns` work like any other phase.
+- New `yieldDuringPhase` hook in `CycleOpts`. Generic in-phase keepalive that long-running phases call every ~5 min while idle to renew the cycle-lock TTL and the Minions worker job lock. Mirrors `yieldBetweenPhases` shape.
+- `CycleReport.totals` grew additively (schema_version stays "1"): new fields `transcripts_processed`, `synth_pages_written`, `patterns_written`. Existing consumers see no breaking change.
+- `synthesize` and `patterns` both fall under `NEEDS_LOCK_PHASES`; read-only invocations like `--phase orphans` continue to skip the lock.
+
+#### CLI extensions (`src/commands/dream.ts`)
+
+- New flags: `--input <file>` (ad-hoc transcript synthesis; implies `--phase synthesize`), `--date YYYY-MM-DD` (single-day), `--from YYYY-MM-DD --to YYYY-MM-DD` (backfill range).
+- `--dry-run` semantics documented explicitly (codex finding #8): runs the cheap Haiku significance verdict (caches it for free) but skips the Sonnet synthesis pass. NOT zero LLM calls.
+- Conflict detection: `--input` plus `--date` / `--from` / `--to` exits 2 with a clear error.
+- Help text now reflects the 8-phase pipeline.
+
+#### Schema migration v25 (`src/core/migrate.ts`, `src/schema.sql`)
+
+- Creates `dream_verdicts (file_path TEXT, content_hash TEXT, worth_processing BOOL, reasons JSONB, judged_at TIMESTAMPTZ, PRIMARY KEY(file_path, content_hash))`. Distinct from `raw_data` (which is page-scoped) ... transcripts being judged aren't pages.
+- RLS-enabled when running as a BYPASSRLS role (matches the existing v24 pattern).
+- New engine methods `getDreamVerdict` / `putDreamVerdict` on both Postgres and PGLite. ON CONFLICT upserts; idempotent across re-runs.
+
+#### Tests
+
+- `test/operations-allow-list.test.ts` (NEW, IRON RULE security regression guard) ... 11 cases covering ALLOW path, REJECT path, glob match (recursive depth), legacy namespace check when allow-list unset, FAIL-CLOSED behavior when `viaSubagent=true` but `subagentId` is missing.
+- `test/cycle-synthesize.test.ts` (NEW) ... 20 cases covering `compileExcludePatterns` word-boundary heuristic, transcript discovery (date filters, multi-source merge, exclude regex, `min_chars`), content-hash stability across edits, `readSingleTranscript` ad-hoc path.
+- `test/cycle-patterns.test.ts` (NEW) ... 12 structural cases covering subagent dispatch wiring, allow-list flow from filing-rules JSON, scope filter (`slug LIKE 'wiki/personal/reflections/%'`), the codex #2 fix (provenance via `subagent_tool_executions`).
+- `test/dream-cli-flags.test.ts` (NEW) ... 9 cases covering `--input` / `--date` / `--from` / `--to` parsing, ISO date validation, conflict detection, dry-run semantics documentation.
+- `test/e2e/dream-allow-list-pglite.test.ts` (NEW) ... 6 cases on PGLite covering the full subagent → put_page allow-list path: in-allow-list slug writes, out-of-allow-list slug rejected, legacy namespace fallback when allow-list unset, `subagent_tool_executions` schema for provenance queries.
+- `test/e2e/dream-synthesize-pglite.test.ts` (NEW) ... 8 cases on PGLite covering disabled/not_configured paths, empty corpus, no-API-key skip path, dry-run semantics, cooldown active/bypass, `dream_verdicts` cache hit.
+
+#### Documentation
+
+- `skills/maintain/SKILL.md` ... new "Dream cycle: synthesize + patterns" section with the quality bar, trust boundary, idempotency model, cooldown semantics, and invocation patterns. Triggers updated to route "process today's session", "synthesize my conversations", and "what patterns did you see" to maintain.
+- `skills/_brain-filing-rules.md` ... new "Dream-cycle synthesize/patterns directories" section documenting the allow-listed paths, slug discipline, and the iron law for synthesis output.
+- `skills/_brain-filing-rules.json` ... new `dream_synthesize_paths.globs` array (single source of truth).
+- `skills/RESOLVER.md` ... new dream-cycle row under brain operations.
+- `skills/migrations/v0.21.0.md` (NEW) ... migration narrative covering schema migration v25 + the optional opt-in for synthesize + tunables.
+- `CLAUDE.md` ... architecture section reflects 8-phase cycle + new files (`src/core/cycle/{synthesize,patterns,transcript-discovery}.ts`).
+
+#### Codex review-driven corrections
+
+Eight findings from the cross-model review caught real implementation traps before merge. All 8 resolutions integrated:
+
+1. Trust signal correction (drop `remote=null` defense, rely on PROTECTED_JOB_NAMES gating).
+2. Provenance via child `subagent_tool_executions` (not `pages.updated_at`).
+3. New `dream_verdicts` mini-table (raw_data is page-scoped and won't fit).
+4. Summary slug regex-compatible: `dream-cycle-summaries/YYYY-MM-DD` (no underscore, no `.md`).
+5. Auto-commit/push deferred to v1.1 (dirty-worktree handling, auth failure, non-FF push need their own design).
+6. Lossy-serialization acknowledged: the orchestrator does fresh-render from DB, not byte-identical round-trip.
+7. Phase ordering: patterns runs AFTER extract so the graph is fresh.
+8. `--dry-run` semantics documented: runs Haiku, skips Sonnet (NOT zero LLM calls).
+
+#### Deferred to v1.1
+
+- Auto git commit + push from the synthesize/patterns phases. v1 writes files locally; either commit yourself or let `gbrain autopilot` handle it.
+- Daily token budget cap. Cooldown is the v1 spend bound.
+- Cross-modal pattern review (currently reflections-only).
+
 ## [0.20.4] - 2026-04-24
 
 **Minions skill consolidation, now honest about what the CLI actually does.**
