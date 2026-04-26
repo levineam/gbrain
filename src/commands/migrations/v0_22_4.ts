@@ -22,9 +22,18 @@
 import { existsSync, mkdirSync, writeFileSync, readFileSync, appendFileSync } from 'fs';
 import { join } from 'path';
 import type { Migration, OrchestratorOpts, OrchestratorResult, OrchestratorPhaseResult } from './types.ts';
+import type { BrainEngine } from '../../core/engine.ts';
 import { loadConfig, toEngineConfig } from '../../core/config.ts';
 import { createEngine } from '../../core/engine-factory.ts';
 import { scanBrainSources, type AuditReport } from '../../core/brain-writer.ts';
+
+/** Test-only injection point for the audit phase. When set, phaseBAudit uses
+ *  this engine instead of loading config + creating a fresh one. Mirrors the
+ *  repair-jsonb pattern. Reset to null in afterAll. */
+let testEngineOverride: BrainEngine | null = null;
+export function __setTestEngineOverride(engine: BrainEngine | null): void {
+  testEngineOverride = engine;
+}
 
 function gbrainDir(): string {
   return join(process.env.HOME || '', '.gbrain');
@@ -55,24 +64,29 @@ function phaseASchema(opts: OrchestratorOpts): OrchestratorPhaseResult {
 async function phaseBAudit(opts: OrchestratorOpts): Promise<{ phase: OrchestratorPhaseResult; report: AuditReport | null }> {
   if (opts.dryRun) return { phase: { name: 'audit', status: 'skipped', detail: 'dry-run' }, report: null };
   try {
-    const config = loadConfig();
-    if (!config) {
-      // No brain configured (fresh dev install or test environment). The
-      // migration audit needs a real brain to walk; treat this as a clean
-      // skip rather than a failure so apply-migrations doesn't break.
-      return {
-        phase: { name: 'audit', status: 'skipped', detail: 'no_brain_configured' },
-        report: null,
-      };
-    }
-    const engineConfig = toEngineConfig(config);
-    const engine = await createEngine(engineConfig);
-    await engine.connect(engineConfig);
     let report: AuditReport;
-    try {
-      report = await scanBrainSources(engine);
-    } finally {
-      await engine.disconnect();
+    if (testEngineOverride) {
+      // Test injection path: caller manages engine lifecycle.
+      report = await scanBrainSources(testEngineOverride);
+    } else {
+      const config = loadConfig();
+      if (!config) {
+        // No brain configured (fresh dev install or test environment). The
+        // migration audit needs a real brain to walk; treat this as a clean
+        // skip rather than a failure so apply-migrations doesn't break.
+        return {
+          phase: { name: 'audit', status: 'skipped', detail: 'no_brain_configured' },
+          report: null,
+        };
+      }
+      const engineConfig = toEngineConfig(config);
+      const engine = await createEngine(engineConfig);
+      await engine.connect(engineConfig);
+      try {
+        report = await scanBrainSources(engine);
+      } finally {
+        await engine.disconnect();
+      }
     }
     if (report.per_source.length === 0) {
       // No sources registered — fresh install or dev-only install. Skip
