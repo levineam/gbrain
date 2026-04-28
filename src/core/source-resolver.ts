@@ -132,6 +132,30 @@ async function assertSourceExists(engine: BrainEngine, id: string): Promise<void
   }
 }
 
+/**
+ * Get the local_path of the resolved source (per the resolveSourceId chain).
+ *
+ * Returns the on-disk brain repo path for the source the user is currently
+ * operating against. Used by `gbrain storage status` and `gbrain export
+ * --restore-only` to find the brain repo without raw SQL or bare try/catch.
+ *
+ * @returns local_path string, or null if the resolved source has none configured.
+ * @throws  If DB error occurs (does NOT silently swallow). Callers handle
+ *          the null case to provide their own fallback (typically a hard error
+ *          telling the user to pass --repo).
+ */
+export async function getDefaultSourcePath(
+  engine: BrainEngine,
+  cwd: string = process.cwd(),
+): Promise<string | null> {
+  const sourceId = await resolveSourceId(engine, null, cwd);
+  const rows = await engine.executeRaw<{ local_path: string | null }>(
+    `SELECT local_path FROM sources WHERE id = $1`,
+    [sourceId],
+  );
+  return rows[0]?.local_path ?? null;
+}
+
 /** Exposed for tests. */
 export const __testing = {
   readDotfileWalk,
