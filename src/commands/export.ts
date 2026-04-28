@@ -5,23 +5,41 @@ import { serializeMarkdown } from '../core/markdown.ts';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
 import { loadStorageConfig, isDbOnly } from '../core/storage-config.ts';
+import { getDefaultSourcePath } from '../core/source-resolver.ts';
 import type { PageType } from '../core/types.ts';
 
 export async function runExport(engine: BrainEngine, args: string[]) {
   const dirIdx = args.indexOf('--dir');
   const outDir = dirIdx !== -1 ? args[dirIdx + 1] : './export';
-  
+
   const repoIdx = args.indexOf('--repo');
-  const repoPath = repoIdx !== -1 ? args[repoIdx + 1] : null;
-  
+  const explicitRepoPath = repoIdx !== -1 ? args[repoIdx + 1] : null;
+
   const typeIdx = args.indexOf('--type');
-  const typeFilter = typeIdx !== -1 ? args[typeIdx + 1] as PageType : undefined;
-  
+  const typeFilter = typeIdx !== -1 ? (args[typeIdx + 1] as PageType) : undefined;
+
   const slugPrefixIdx = args.indexOf('--slug-prefix');
   const slugPrefix = slugPrefixIdx !== -1 ? args[slugPrefixIdx + 1] : undefined;
-  
+
   const restoreOnly = args.includes('--restore-only');
-  
+
+  // Resolution chain (D5): explicit --repo → typed sources.getDefault() →
+  // hard-error for restore-only paths (never fall through to cwd).
+  // For non-restore exports, repoPath stays null because regular export
+  // doesn't need a brain repo to run (D26 — exports include everything).
+  let repoPath: string | null = explicitRepoPath;
+  if (restoreOnly && !repoPath) {
+    repoPath = await getDefaultSourcePath(engine);
+    if (!repoPath) {
+      console.error(
+        `Error: gbrain export --restore-only requires --repo <path> or a configured\n` +
+          `default source with a local_path. Run \`gbrain sources list\` to inspect\n` +
+          `sources, or pass --repo explicitly.`,
+      );
+      process.exit(1);
+    }
+  }
+
   // Load storage configuration if repo path is provided
   const storageConfig = repoPath ? loadStorageConfig(repoPath) : null;
   

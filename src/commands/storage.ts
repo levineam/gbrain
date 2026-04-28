@@ -3,6 +3,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import { loadStorageConfig, validateStorageConfig, getStorageTier } from '../core/storage-config.ts';
 import type { StorageConfig, StorageTier } from '../core/storage-config.ts';
 import { walkBrainRepo, type DiskFileEntry } from '../core/disk-walk.ts';
+import { getDefaultSourcePath } from '../core/source-resolver.ts';
 
 interface StorageStatusResult {
   config: StorageConfig | null;
@@ -30,25 +31,16 @@ export async function runStorage(engine: BrainEngine, args: string[]) {
 }
 
 async function runStorageStatus(engine: BrainEngine, args: string[]) {
-  // Try to determine repo path from args or sync configuration
+  // Resolution chain (D5): explicit --repo flag → typed sources.getDefault()
+  // → null. NO cwd fallback (the original silent footgun). When the user
+  // passes --repo nothing else fires; otherwise we ask the sources table
+  // through the typed accessor (Issue #3 — replaces raw SQL + bare try/catch).
   let repoPath: string | null = null;
   const repoIdx = args.indexOf('--repo');
   if (repoIdx !== -1 && args[repoIdx + 1]) {
     repoPath = args[repoIdx + 1];
   } else {
-    // Try to get from sync configuration
-    try {
-      const sources = await engine.executeRaw<{local_path: string | null}>(
-        `SELECT local_path FROM sources WHERE id = $1`,
-        ['default']
-      );
-      if (sources[0]?.local_path) {
-        repoPath = sources[0].local_path;
-      }
-    } catch {
-      // Fall back to current directory if no sources configured
-      repoPath = process.cwd();
-    }
+    repoPath = await getDefaultSourcePath(engine);
   }
 
   const result = await getStorageStatus(engine, repoPath);
