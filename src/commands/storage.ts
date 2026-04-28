@@ -5,36 +5,38 @@ import type { StorageConfig, StorageTier } from '../core/storage-config.ts';
 import { walkBrainRepo, type DiskFileEntry } from '../core/disk-walk.ts';
 import { getDefaultSourcePath } from '../core/source-resolver.ts';
 
-interface StorageStatusResult {
+/**
+ * Pure-data result of a storage-status query. No side effects, no I/O
+ * beyond the engine call and one filesystem walk. Consumed by both the
+ * JSON formatter and the human formatter; kept narrow so it's a stable
+ * MCP/scripting contract (D14: storage_status is read-only MCP-exposed).
+ */
+export interface StorageStatusResult {
   config: StorageConfig | null;
   repoPath: string | null;
   totalPages: number;
   pagesByTier: Record<StorageTier, number>;
-  missingFiles: Array<{
-    slug: string;
-    expectedPath: string;
-  }>;
+  missingFiles: Array<{ slug: string; expectedPath: string }>;
   diskUsageByTier: Record<StorageTier, number>;
   warnings: string[];
 }
 
-export async function runStorage(engine: BrainEngine, args: string[]) {
+// ── Dispatcher ────────────────────────────────────────────
+
+export async function runStorage(engine: BrainEngine, args: string[]): Promise<void> {
   const subcommand = args[0];
-  
   if (!subcommand || subcommand === 'status') {
     await runStorageStatus(engine, args.slice(1));
-  } else {
-    console.error(`Unknown storage subcommand: ${subcommand}`);
-    console.error('Available subcommands: status');
-    process.exit(1);
+    return;
   }
+  console.error(`Unknown storage subcommand: ${subcommand}`);
+  console.error('Available subcommands: status');
+  process.exit(1);
 }
 
-async function runStorageStatus(engine: BrainEngine, args: string[]) {
-  // Resolution chain (D5): explicit --repo flag → typed sources.getDefault()
-  // → null. NO cwd fallback (the original silent footgun). When the user
-  // passes --repo nothing else fires; otherwise we ask the sources table
-  // through the typed accessor (Issue #3 — replaces raw SQL + bare try/catch).
+async function runStorageStatus(engine: BrainEngine, args: string[]): Promise<void> {
+  // Resolution chain (D5, Issue #3): explicit --repo → typed accessor → null.
+  // No cwd fallback. The original silent footgun is dead.
   let repoPath: string | null = null;
   const repoIdx = args.indexOf('--repo');
   if (repoIdx !== -1 && args[repoIdx + 1]) {
@@ -44,82 +46,30 @@ async function runStorageStatus(engine: BrainEngine, args: string[]) {
   }
 
   const result = await getStorageStatus(engine, repoPath);
-  
+
   if (args.includes('--json')) {
-    console.log(JSON.stringify(result, null, 2));
+    console.log(formatStorageStatusJson(result));
     return;
   }
-  
-  // Human-readable output
-  console.log('Storage Status');
-  console.log('==============\n');
-  
-  if (!result.config) {
-    console.log('No gbrain.yml configuration found.');
-    if (result.repoPath) {
-      console.log(`Checked: ${result.repoPath}/gbrain.yml`);
-    }
-    console.log('\nAll pages are stored in git by default.');
-    console.log(`Total pages: ${result.totalPages}`);
-    return;
-  }
-  
-  console.log(`Repository: ${result.repoPath}`);
-  console.log(`Total pages: ${result.totalPages}\n`);
-  
-  console.log('Storage Tiers:');
-  console.log('-------------');
-  console.log(`DB tracked:     ${result.pagesByTier.db_tracked.toLocaleString()} pages`);
-  console.log(`DB only:        ${result.pagesByTier.db_only.toLocaleString()} pages`);
-  console.log(`Unspecified:    ${result.pagesByTier.unspecified.toLocaleString()} pages`);
-
-  if (result.diskUsageByTier.db_tracked > 0 || result.diskUsageByTier.db_only > 0) {
-    console.log('\nDisk Usage:');
-    console.log('-----------');
-    if (result.diskUsageByTier.db_tracked > 0) {
-      console.log(`DB tracked:     ${formatBytes(result.diskUsageByTier.db_tracked)}`);
-    }
-    if (result.diskUsageByTier.db_only > 0) {
-      console.log(`DB only:        ${formatBytes(result.diskUsageByTier.db_only)}`);
-    }
-    if (result.diskUsageByTier.unspecified > 0) {
-      console.log(`Unspecified:    ${formatBytes(result.diskUsageByTier.unspecified)}`);
-    }
-  }
-
-  if (result.missingFiles.length > 0) {
-    console.log('\nMissing Files (need restore):');
-    console.log('-----------------------------');
-    for (const missing of result.missingFiles.slice(0, 10)) {
-      console.log(`  ${missing.slug}`);
-    }
-    if (result.missingFiles.length > 10) {
-      console.log(`  ... and ${result.missingFiles.length - 10} more`);
-    }
-    console.log(`\nUse: gbrain export --restore-only --repo "${result.repoPath}"`);
-  }
-
-  if (result.warnings.length > 0) {
-    console.log('\nWarnings:');
-    console.log('---------');
-    for (const warning of result.warnings) {
-      console.log(`  ! ${warning}`);
-    }
-  }
-
-  console.log('\nConfiguration:');
-  console.log('--------------');
-  console.log('DB tracked directories:');
-  for (const dir of result.config.db_tracked) {
-    console.log(`  - ${dir}`);
-  }
-  console.log('\nDB-only directories:');
-  for (const dir of result.config.db_only) {
-    console.log(`  - ${dir}`);
-  }
+  console.log(formatStorageStatusHuman(result));
 }
 
-async function getStorageStatus(engine: BrainEngine, repoPath: string | null): Promise<StorageStatusResult> {
+// ── Pure data ─────────────────────────────────────────────
+
+/**
+ * Compute the storage status against the given engine + brain repo path.
+ *
+ * Side-effect-free apart from the engine.listPages call and one recursive
+ * filesystem walk. Pure for testability — formatters are tested separately.
+ *
+ * Returns null `config` when no gbrain.yml is present at repoPath. In that
+ * case pagesByTier is all zeros for db_tracked/db_only and totals roll up
+ * into unspecified.
+ */
+export async function getStorageStatus(
+  engine: BrainEngine,
+  repoPath: string | null,
+): Promise<StorageStatusResult> {
   const config = repoPath ? loadStorageConfig(repoPath) : null;
   const warnings = config ? validateStorageConfig(config) : [];
 
@@ -157,12 +107,100 @@ async function getStorageStatus(engine: BrainEngine, repoPath: string | null): P
   };
 }
 
+// ── JSON formatter ────────────────────────────────────────
+
+/**
+ * Serialize StorageStatusResult to a stable JSON contract. Indented for
+ * human readability; agents/orchestrators can parse with a standard
+ * JSON.parse. Schema is the StorageStatusResult interface above.
+ */
+export function formatStorageStatusJson(result: StorageStatusResult): string {
+  return JSON.stringify(result, null, 2);
+}
+
+// ── Human formatter ───────────────────────────────────────
+
+/**
+ * Render StorageStatusResult to ASCII text suitable for terminal output.
+ * D10 lock: ASCII separators only — universally portable. No unicode
+ * box-drawing.
+ */
+export function formatStorageStatusHuman(result: StorageStatusResult): string {
+  const lines: string[] = [];
+  lines.push('Storage Status');
+  lines.push('==============');
+  lines.push('');
+
+  if (!result.config) {
+    lines.push('No gbrain.yml configuration found.');
+    if (result.repoPath) lines.push(`Checked: ${result.repoPath}/gbrain.yml`);
+    lines.push('');
+    lines.push('All pages are stored in git by default.');
+    lines.push(`Total pages: ${result.totalPages}`);
+    return lines.join('\n');
+  }
+
+  lines.push(`Repository: ${result.repoPath}`);
+  lines.push(`Total pages: ${result.totalPages}`);
+  lines.push('');
+  lines.push('Storage Tiers:');
+  lines.push('-------------');
+  lines.push(`DB tracked:     ${result.pagesByTier.db_tracked.toLocaleString()} pages`);
+  lines.push(`DB only:        ${result.pagesByTier.db_only.toLocaleString()} pages`);
+  lines.push(`Unspecified:    ${result.pagesByTier.unspecified.toLocaleString()} pages`);
+
+  if (result.diskUsageByTier.db_tracked > 0 || result.diskUsageByTier.db_only > 0) {
+    lines.push('');
+    lines.push('Disk Usage:');
+    lines.push('-----------');
+    if (result.diskUsageByTier.db_tracked > 0) {
+      lines.push(`DB tracked:     ${formatBytes(result.diskUsageByTier.db_tracked)}`);
+    }
+    if (result.diskUsageByTier.db_only > 0) {
+      lines.push(`DB only:        ${formatBytes(result.diskUsageByTier.db_only)}`);
+    }
+    if (result.diskUsageByTier.unspecified > 0) {
+      lines.push(`Unspecified:    ${formatBytes(result.diskUsageByTier.unspecified)}`);
+    }
+  }
+
+  if (result.missingFiles.length > 0) {
+    lines.push('');
+    lines.push('Missing Files (need restore):');
+    lines.push('-----------------------------');
+    for (const missing of result.missingFiles.slice(0, 10)) {
+      lines.push(`  ${missing.slug}`);
+    }
+    if (result.missingFiles.length > 10) {
+      lines.push(`  ... and ${result.missingFiles.length - 10} more`);
+    }
+    lines.push('');
+    lines.push(`Use: gbrain export --restore-only --repo "${result.repoPath}"`);
+  }
+
+  if (result.warnings.length > 0) {
+    lines.push('');
+    lines.push('Warnings:');
+    lines.push('---------');
+    for (const warning of result.warnings) lines.push(`  ! ${warning}`);
+  }
+
+  lines.push('');
+  lines.push('Configuration:');
+  lines.push('--------------');
+  lines.push('DB tracked directories:');
+  for (const dir of result.config.db_tracked) lines.push(`  - ${dir}`);
+  lines.push('');
+  lines.push('DB-only directories:');
+  for (const dir of result.config.db_only) lines.push(`  - ${dir}`);
+
+  return lines.join('\n');
+}
+
 function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B';
-  
   const k = 1024;
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
-  
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
