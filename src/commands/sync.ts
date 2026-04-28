@@ -581,7 +581,7 @@ export async function runSync(engine: BrainEngine, args: string[]) {
       result.status !== 'dry_run' &&
       result.status !== 'blocked_by_failures'
     ) {
-      manageGitignore(opts.repoPath);
+      manageGitignore(opts.repoPath, engine.kind);
     }
     return;
   }
@@ -604,7 +604,7 @@ export async function runSync(engine: BrainEngine, args: string[]) {
         result.status !== 'dry_run' &&
         result.status !== 'blocked_by_failures'
       ) {
-        manageGitignore(opts.repoPath);
+        manageGitignore(opts.repoPath, engine.kind);
       }
     } catch (e: unknown) {
       consecutiveErrors++;
@@ -633,11 +633,23 @@ export async function runSync(engine: BrainEngine, args: string[]) {
  *   - The repo is a git submodule (`.git` is a file not a directory) —
  *     D49 lock; submodule .gitignore changes don't survive parent updates
  *
+ * On PGLite (D4): emits a once-per-process soft-warn explaining that
+ * tiering has limited effect — but still manages the .gitignore so the
+ * config-present user gets the gitignore housekeeping.
+ *
  * Failures (write permission denied, EROFS, etc.) are caught, warned, and
  * swallowed (D9 lock). Sync's primary job is moving data; .gitignore
  * management is a side effect — don't kill the main job for the side effect.
  */
-export function manageGitignore(repoPath: string): void {
+let _pgliteTierWarned = false;
+export function __resetPGLiteTierWarn(): void {
+  _pgliteTierWarned = false;
+}
+
+export function manageGitignore(
+  repoPath: string,
+  engineKind?: 'pglite' | 'postgres',
+): void {
   if (process.env.GBRAIN_NO_GITIGNORE === '1') {
     return;
   }
@@ -671,6 +683,16 @@ export function manageGitignore(repoPath: string): void {
   }
   if (!storageConfig || storageConfig.db_only.length === 0) {
     return;
+  }
+
+  // D4 soft-warn: storage tiering has limited effect on PGLite, but the
+  // .gitignore housekeeping still helps. Warn once per process; proceed.
+  if (engineKind === 'pglite' && !_pgliteTierWarned) {
+    _pgliteTierWarned = true;
+    console.warn(
+      `Note: storage tiering has limited effect on PGLite — pages live in your ` +
+        `local database file regardless of tier. Managing .gitignore anyway.`,
+    );
   }
 
   const gitignorePath = join(repoPath, '.gitignore');

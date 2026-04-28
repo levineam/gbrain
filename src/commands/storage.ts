@@ -45,6 +45,8 @@ export async function runStorage(engine: BrainEngine, args: string[]): Promise<v
 }
 
 async function runStorageStatus(engine: BrainEngine, args: string[]): Promise<void> {
+  warnIfPGLite(engine);
+
   // Resolution chain (D5, Issue #3): explicit --repo → typed accessor → null.
   // No cwd fallback. The original silent footgun is dead.
   let repoPath: string | null = null;
@@ -62,6 +64,33 @@ async function runStorageStatus(engine: BrainEngine, args: string[]): Promise<vo
     return;
   }
   console.log(formatStorageStatusHuman(result));
+}
+
+/**
+ * D4: storage tiering on PGLite is a partial feature. The "DB" the pages
+ * live in IS the local file gbrain uses for everything else, so "db_only"
+ * has no real offload effect. The .gitignore management still helps
+ * (keeps bulk content out of git history), so we warn but proceed.
+ *
+ * Once-per-process via a module-local flag — sub-commands invoked from a
+ * single CLI run share the same warning.
+ */
+let _pgliteWarned = false;
+function warnIfPGLite(engine: BrainEngine): void {
+  if (_pgliteWarned) return;
+  if (engine.kind !== 'pglite') return;
+  _pgliteWarned = true;
+  console.warn(
+    `Note: storage tiering has limited effect on PGLite — pages live in your ` +
+      `local database file regardless of tier. The .gitignore management still ` +
+      `keeps bulk content out of git history. To get full tiering, migrate to ` +
+      `Postgres with \`gbrain migrate --to supabase\`.`,
+  );
+}
+
+/** Reset for tests. */
+export function __resetPGLiteWarn(): void {
+  _pgliteWarned = false;
 }
 
 // ── Pure data ─────────────────────────────────────────────
