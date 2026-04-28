@@ -122,10 +122,23 @@ gbrain runs behind a trusted reverse proxy:
 GBRAIN_HTTP_TRUST_PROXY=1 gbrain serve --http --port 8787
 ```
 
-Only set this when gbrain is behind a proxy you control. Without
-the flag, gbrain ignores `X-Forwarded-For` and uses the socket peer
-address as the rate-limit key, which prevents IP spoofing via header
-injection.
+**Critical safety contract:** only set `GBRAIN_HTTP_TRUST_PROXY=1` when
+**both** of these are true:
+
+1. gbrain is reachable only via a trusted reverse proxy (not directly
+   exposed to the internet on the configured port). The simplest
+   guarantee is to bind gbrain to `127.0.0.1` or a private interface
+   and have the proxy forward to it.
+2. The proxy strips any client-supplied `X-Forwarded-For` and `X-Real-IP`
+   headers, then sets them itself. (nginx with `proxy_set_header
+   X-Forwarded-For $remote_addr` does this; Cloudflare and most cloud
+   load balancers handle it automatically.)
+
+If gbrain is reachable directly AND `GBRAIN_HTTP_TRUST_PROXY=1` is set,
+clients can spoof their IP by sending arbitrary `X-Forwarded-For`
+headers, defeating the pre-auth IP rate limit. Without the flag, gbrain
+ignores all forwarded-for headers and uses the socket peer address,
+which is the safe default for direct-exposure deployments.
 
 ### Body size cap
 

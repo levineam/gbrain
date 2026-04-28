@@ -59,6 +59,11 @@ function makeFakeEngine(cfg: FakeEngineConfig = {}): FakeEngine {
   const sql = makeSqlTag((query, values) => {
     if (cfg.dbDown && query.startsWith('SELECT')) throw new Error('db down');
 
+    if (query === 'SELECT 1') {
+      // /health DB probe
+      return [{ '?column?': 1 }];
+    }
+
     if (query.startsWith('SELECT id, name FROM access_tokens')) {
       const tokenHash = values[0] as string;
       if (revokedTokens.has(tokenHash)) return [];
@@ -201,13 +206,25 @@ describe('http-transport: auth', () => {
     expect(r.status).toBe(401);
   });
 
-  test('6. /health → 200 without auth, body has expected fields', async () => {
+  test('6. /health → 200 without auth, body has expected fields, probes DB', async () => {
     const r = await fetch(`${srv.url}/health`);
     expect(r.status).toBe(200);
     const body = await r.json();
     expect(body.status).toBe('ok');
     expect(body.transport).toBe('http');
     expect(body.version).toBeString();
+    expect(body.db).toBe('ok');
+  });
+
+  test('6b. /health → 503 when DB is unreachable', async () => {
+    const dbDownSrv = await startTest({ dbDown: true });
+    try {
+      const r = await fetch(`${dbDownSrv.url}/health`);
+      expect(r.status).toBe(503);
+      const body = await r.json();
+      expect(body.status).toBe('unhealthy');
+      expect(body.db).toBe('unreachable');
+    } finally { dbDownSrv.stop(); }
   });
 });
 

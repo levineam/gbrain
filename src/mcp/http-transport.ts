@@ -199,12 +199,21 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
         return new Response(null, { headers: corsPreflightHeaders(origin) });
       }
 
-      // Health check — no auth, no rate limit.
+      // Health check — no auth, no rate limit. Probes the DB so orchestration
+      // doesn't see "ok" while clients are getting misleading 401s during a DB outage.
       if (path === '/health') {
-        return Response.json(
-          { status: 'ok', version: VERSION, transport: 'http' },
-          { headers: corsHeaders(origin) },
-        );
+        try {
+          await sql`SELECT 1`;
+          return Response.json(
+            { status: 'ok', version: VERSION, transport: 'http', db: 'ok' },
+            { headers: corsHeaders(origin) },
+          );
+        } catch (e: any) {
+          return Response.json(
+            { status: 'unhealthy', version: VERSION, transport: 'http', db: 'unreachable', error: e?.message ?? 'unknown' },
+            { status: 503, headers: corsHeaders(origin) },
+          );
+        }
       }
 
       if (path !== '/mcp') {
