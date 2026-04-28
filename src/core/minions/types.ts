@@ -170,6 +170,11 @@ export interface MinionWorkerOpts {
    *  case where all concurrency slots are wedged with zero job completions
    *  so the per-job check never fires. */
   rssCheckInterval?: number;
+  /** Self-health-check interval in ms. 0 = disabled. Default: 60000 (1 minute).
+   *  Automatically disabled when running under a supervisor (GBRAIN_SUPERVISED=1).
+   *  Provides DB liveness probes and stall detection for bare `gbrain jobs work`
+   *  deployments managed by external process managers (systemd, Docker, cron). */
+  healthCheckInterval?: number;
 }
 
 // --- Job Context (passed to handlers) ---

@@ -328,6 +328,31 @@ describe('MinionSupervisor', () => {
     }, 15_000);
   });
 
+  describe('integration: GBRAIN_SUPERVISED env var (v0.22.7)', () => {
+    it('sets GBRAIN_SUPERVISED=1 on spawned worker child', async () => {
+      const outFile = join(tmpdir(), `gbrain-sup-supervised-${process.pid}-${Date.now()}.txt`);
+      try { unlinkSync(outFile); } catch { /* may not exist */ }
+
+      const h = makeHarness('supervised-env', `printf '%s\n' "\${GBRAIN_SUPERVISED-UNSET}" > "$OUT_FILE" ; exit 0`);
+
+      try {
+        const sup = spawnSupervisor(h, {
+          OUT_FILE: outFile,
+          SUP_MAX_CRASHES: '1',
+        });
+
+        await sup.exited;
+
+        expect(existsSync(outFile)).toBe(true);
+        const childSawEnv = readFileSync(outFile, 'utf8').trim();
+        expect(childSawEnv).toBe('1');
+      } finally {
+        try { unlinkSync(outFile); } catch { /* noop */ }
+        h.cleanup();
+      }
+    }, 15_000);
+  });
+
   describe('integration: --max-rss spawn args (v0.21)', () => {
     it('passes --max-rss 2048 to spawned worker by default', async () => {
       const outFile = join(tmpdir(), `gbrain-sup-maxrss-${process.pid}-${Date.now()}.txt`);

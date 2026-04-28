@@ -33,14 +33,14 @@ export function parseMaxWaitingFlag(args: string[]): number | undefined {
 }
 
 /** Parse `--max-rss N` (MB). Returns:
- *  - 0 if the flag is absent (no watchdog by default for bare `jobs work`)
+ *  - undefined if the flag is absent (caller decides the default)
  *  - 0 if `--max-rss 0` (explicit disable)
  *  - the value if >= 256
  *  Errors and exits the process if the flag is non-numeric, negative, or
  *  positive but < 256 (likely a GB-vs-MB unit-confusion typo). */
-export function parseMaxRssFlag(args: string[]): number {
+export function parseMaxRssFlag(args: string[]): number | undefined {
   const raw = parseFlag(args, '--max-rss');
-  if (raw === undefined) return 0;
+  if (raw === undefined) return undefined;
   const parsed = parseInt(raw, 10);
   if (!Number.isFinite(parsed) || parsed < 0) {
     console.error(`Error: --max-rss must be a non-negative integer (MB), got "${raw}"`);
@@ -133,6 +133,7 @@ USAGE
   gbrain jobs stats
   gbrain jobs smoke
   gbrain jobs work [--queue Q] [--concurrency N] [--max-rss MB]
+                   [--health-interval MS]
   gbrain jobs supervisor [start] [--detach] [--json]
                          [--concurrency N] [--queue Q] [--pid-file PATH]
                          [--max-crashes N] [--health-interval N]
@@ -638,19 +639,32 @@ HANDLER TYPES (built in)
 
       const queueName = parseFlag(args, '--queue') ?? 'default';
       const concurrency = resolveWorkerConcurrency(args);
-      // --max-rss is opt-in for bare `gbrain jobs work` — preserves pre-v0.21 behavior
-      // for operators with legitimately large embed/import working sets. The supervisor
-      // path injects a default 2048; this code path does not.
-      const maxRssMb = parseMaxRssFlag(args);
+      // --max-rss defaults to 2048 for bare workers (matching supervisor default).
+      // This catches memory-leak stalls that previously went undetected without
+      // a supervisor. Operators can opt out with `--max-rss 0`.
+      const maxRssExplicit = parseMaxRssFlag(args);
+      const maxRssMb = maxRssExplicit ?? 2048;
+
+      // --health-interval: self-health-check period. 0 disables. Default: 60s.
+      // Provides DB liveness probes + stall detection for bare workers.
+      // Automatically skipped when running under a supervisor (GBRAIN_SUPERVISED=1).
+      const healthRaw = parseFlag(args, '--health-interval');
+      const healthCheckInterval = healthRaw !== undefined ? parseInt(healthRaw, 10) : 60_000;
 
       try { await queue.ensureSchema(); }
       catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(1); }
 
-      const worker = new MinionWorker(engine, { queue: queueName, concurrency, maxRssMb });
+      const worker = new MinionWorker(engine, {
+        queue: queueName, concurrency, maxRssMb, healthCheckInterval,
+      });
       await registerBuiltinHandlers(worker, engine);
 
+      const isSupervisedChild = !!process.env.GBRAIN_SUPERVISED;
       const watchdogNote = maxRssMb > 0 ? `, watchdog: ${maxRssMb}MB` : '';
-      console.log(`Minion worker started (queue: ${queueName}, concurrency: ${concurrency}${watchdogNote})`);
+      const healthNote = !isSupervisedChild && healthCheckInterval > 0
+        ? `, health-check: ${Math.round(healthCheckInterval / 1000)}s`
+        : '';
+      console.log(`Minion worker started (queue: ${queueName}, concurrency: ${concurrency}${watchdogNote}${healthNote})`);
       console.log(`Registered handlers: ${worker.registeredNames.join(', ')}`);
       await worker.start();
       break;
@@ -792,10 +806,8 @@ HANDLER TYPES (built in)
                              !!process.env.GBRAIN_ALLOW_SHELL_JOBS;
       const detach = hasFlag(args, '--detach');
       // Supervisor defaults --max-rss 2048 (MB) — main production path uses
-      // the supervisor, so the watchdog is on by default here. parseMaxRssFlag
-      // returns 0 when the flag is absent; substitute the supervisor default.
-      const maxRssRaw = parseMaxRssFlag(args);
-      const maxRssMb = parseFlag(args, '--max-rss') === undefined ? 2048 : maxRssRaw;
+      // the supervisor, so the watchdog is on by default here.
+      const maxRssMb = parseMaxRssFlag(args) ?? 2048;
 
       const cliPath = parseFlag(args, '--cli-path') ?? resolveGbrainCliPath();
 

@@ -81,6 +81,7 @@ export class MinionWorker {
       maxRssMb: opts?.maxRssMb ?? 0,
       getRss: opts?.getRss ?? (() => process.memoryUsage().rss),
       rssCheckInterval: opts?.rssCheckInterval ?? 60000,
+      healthCheckInterval: opts?.healthCheckInterval ?? 60000,
     };
   }
 
@@ -155,6 +156,79 @@ export class MinionWorker {
       }, this.opts.rssCheckInterval);
     }
 
+    // Self-health-check — provides supervisor-grade monitoring for bare workers.
+    // Disabled when running under a supervisor (GBRAIN_SUPERVISED=1) or when
+    // healthCheckInterval is 0. Catches two failure modes that leave the process
+    // alive but non-functional:
+    //   1. DB connection death (Supabase/PgBouncer drops, network blip)
+    //   2. Worker stall (event loop alive but not claiming/completing jobs)
+    const isSupervisedChild = !!process.env.GBRAIN_SUPERVISED;
+    let healthTimer: ReturnType<typeof setInterval> | null = null;
+    if (!isSupervisedChild && this.opts.healthCheckInterval > 0) {
+      let consecutiveDbFailures = 0;
+      let lastKnownCompleted = this.jobsCompleted;
+      let lastCompletionTime = Date.now();
+      let stallWarningSince: number | null = null;
+
+      healthTimer = setInterval(async () => {
+        // --- 1. DB liveness probe ---
+        try {
+          await this.engine.executeRaw('SELECT 1');
+          consecutiveDbFailures = 0;
+        } catch (e) {
+          consecutiveDbFailures++;
+          const msg = e instanceof Error ? e.message : String(e);
+          console.error(`[health] DB probe failed (${consecutiveDbFailures}/3): ${msg}`);
+          if (consecutiveDbFailures >= 3) {
+            console.error('[health] DB unreachable after 3 consecutive probes. Exiting for process-manager restart.');
+            process.exit(1);
+          }
+          return; // Skip stall check when DB is flaky
+        }
+
+        // --- 2. Stall detection ---
+        if (this.jobsCompleted > lastKnownCompleted) {
+          lastKnownCompleted = this.jobsCompleted;
+          lastCompletionTime = Date.now();
+          stallWarningSince = null;
+        }
+
+        const minutesSinceCompletion = (Date.now() - lastCompletionTime) / 60_000;
+
+        // Only check for stalls when no jobs are in-flight and it's been a while
+        if (minutesSinceCompletion > 5 && this.inFlight.size === 0) {
+          try {
+            const rows = await this.engine.executeRaw<{ cnt: string }>(
+              `SELECT count(*)::text AS cnt FROM minion_jobs WHERE status = 'waiting' AND queue = $1`,
+              [this.opts.queue],
+            );
+            const waiting = parseInt(rows[0]?.cnt ?? '0', 10);
+            if (waiting > 0) {
+              if (!stallWarningSince) {
+                stallWarningSince = Date.now();
+                console.warn(
+                  `[health] Possible stall: ${waiting} waiting job(s), 0 in-flight, ` +
+                  `${Math.round(minutesSinceCompletion)}m since last completion`,
+                );
+              } else if (Date.now() - stallWarningSince > 10 * 60_000) {
+                console.error(
+                  `[health] Worker stalled for 10+ minutes with ${waiting} waiting job(s). ` +
+                  `Exiting for process-manager restart.`,
+                );
+                process.exit(1);
+              }
+            } else {
+              stallWarningSince = null; // Queue empty — not stalled, just idle
+            }
+          } catch {
+            // DB query failed — the liveness probe above will catch persistent failures
+          }
+        } else {
+          stallWarningSince = null;
+        }
+      }, this.opts.healthCheckInterval);
+    }
+
     try {
       while (this.running) {
         // Promote delayed jobs
@@ -201,6 +275,7 @@ export class MinionWorker {
     } finally {
       clearInterval(stalledTimer);
       if (rssTimer) clearInterval(rssTimer);
+      if (healthTimer) clearInterval(healthTimer);
       process.removeListener('SIGTERM', shutdown);
       process.removeListener('SIGINT', shutdown);
 

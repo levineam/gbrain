@@ -2306,3 +2306,95 @@ describe('checkAborted (v0.20.5 cycle signal)', () => {
     }).toThrow('aborted between phases: timeout');
   });
 });
+
+// --- v0.22.7: Self-health-check for bare workers ---
+
+describe('MinionWorker: self-health-check', () => {
+  test('health check is active when GBRAIN_SUPERVISED is not set', async () => {
+    // Save and clear the env var
+    const saved = process.env.GBRAIN_SUPERVISED;
+    delete process.env.GBRAIN_SUPERVISED;
+
+    try {
+      const worker = new MinionWorker(engine, {
+        queue: 'default',
+        concurrency: 1,
+        healthCheckInterval: 100, // fast for testing
+        pollInterval: 50,
+        stalledInterval: 10_000,
+        maxRssMb: 0,
+      });
+
+      worker.register('noop', async () => {});
+      await queue.add('noop', {});
+
+      const startPromise = worker.start();
+      // Let the health check fire at least once (100ms interval)
+      await new Promise(r => setTimeout(r, 300));
+      worker.stop();
+      await startPromise;
+
+      // Worker should have processed the job despite health check running
+      const completed = await queue.getJobs({ status: 'completed' });
+      expect(completed.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      if (saved !== undefined) process.env.GBRAIN_SUPERVISED = saved;
+      else delete process.env.GBRAIN_SUPERVISED;
+    }
+  }, 10_000);
+
+  test('health check is skipped when GBRAIN_SUPERVISED=1', async () => {
+    const saved = process.env.GBRAIN_SUPERVISED;
+    process.env.GBRAIN_SUPERVISED = '1';
+
+    try {
+      const worker = new MinionWorker(engine, {
+        queue: 'default',
+        concurrency: 1,
+        healthCheckInterval: 100,
+        pollInterval: 50,
+        stalledInterval: 10_000,
+        maxRssMb: 0,
+      });
+
+      worker.register('noop', async () => {});
+      await queue.add('noop', {});
+
+      const startPromise = worker.start();
+      await new Promise(r => setTimeout(r, 300));
+      worker.stop();
+      await startPromise;
+
+      // Worker should still process jobs fine
+      const completed = await queue.getJobs({ status: 'completed' });
+      expect(completed.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      if (saved !== undefined) process.env.GBRAIN_SUPERVISED = saved;
+      else delete process.env.GBRAIN_SUPERVISED;
+    }
+  }, 10_000);
+
+  test('healthCheckInterval=0 disables health check', async () => {
+    delete process.env.GBRAIN_SUPERVISED;
+
+    const worker = new MinionWorker(engine, {
+      queue: 'default',
+      concurrency: 1,
+      healthCheckInterval: 0,
+      pollInterval: 50,
+      stalledInterval: 10_000,
+      maxRssMb: 0,
+    });
+
+    worker.register('noop', async () => {});
+    await queue.add('noop', {});
+
+    const startPromise = worker.start();
+    await new Promise(r => setTimeout(r, 300));
+    worker.stop();
+    await startPromise;
+
+    const completed = await queue.getJobs({ status: 'completed' });
+    expect(completed.length).toBeGreaterThanOrEqual(1);
+  }, 10_000);
+});

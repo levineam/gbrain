@@ -427,6 +427,11 @@ export class MinionSupervisor {
       } else {
         delete env.GBRAIN_ALLOW_SHELL_JOBS;
       }
+      // Signal to the child worker that it's running under a supervisor.
+      // The worker's self-health-check (DB probes, stall detection) is
+      // redundant when the supervisor already provides these — setting
+      // this env var causes the worker to skip its own health timer.
+      env.GBRAIN_SUPERVISED = '1';
 
       this.lastStartTime = Date.now();
 
