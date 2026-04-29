@@ -2,6 +2,129 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.22.14] - 2026-04-29
+
+**Bare `gbrain jobs work` now self-monitors and fail-stops cleanly when its database dies or the queue stalls.**
+**The wedged-worker class of bug — process alive, jobs piling up, your `pgrep` check happily green — is gone.**
+
+A production brain (54K pages, Supabase Postgres, 3-concurrency worker under a cron-based PM)
+hit it last week: worker process state=Sl at 13:15 UTC, stopped claiming jobs, 21 jobs stacked
+in `waiting` over two hours, 5 autopilot-cycles dead-lettered at the 600s timeout, then 150
+zombie processes accumulated over the container's 31-day life. The PM's `pgrep` saw a live
+PID and reported green the entire time.
+
+Pre-v0.22.14, bare `gbrain jobs work` had **zero** health monitoring. The supervisor (`gbrain
+jobs supervisor`) had the right protections — DB liveness probes, stall detection, RSS
+watchdog, reconnect on transient PgBouncer blips — but the supervisor wraps `jobs work` as a
+child, and many production deployments run bare `jobs work` directly under systemd, Docker,
+launchd, cron watchdog, or supervisord. That mode got nothing.
+
+This release moves health monitoring into the bare worker itself, gated by `GBRAIN_SUPERVISED=1`
+so it doesn't double up under the supervisor. When the worker detects it's wedged, it emits an
+`'unhealthy'` event with a structured reason, and the CLI calls `process.exit(1)` so the external
+PM restarts it cleanly. **This is fail-stop:** the worker exits and stays dead until your PM
+brings it back. If you run bare `jobs work` without a restart loop, you need one now.
+
+### The numbers that matter
+
+Detection signatures the new health check catches, measured against the production incident
+above (and the 30-day deployment running under the band-aid bash watchdog Garry deployed before
+this fix):
+
+| Failure mode | Before v0.22.14 | After v0.22.14 |
+|---|---|---|
+| DB connection death (Supabase/PgBouncer drop) | undetected; worker idles forever | 3 consecutive `SELECT 1` failures (≤3min) → `'unhealthy'`+exit |
+| Hung DB probe (network partition) | timer wedged forever, monitoring silently disabled | 10s probe timeout per tick → counted as failure → exit at strike 3 |
+| Worker stall (event loop alive, claim returns null) | undetected; jobs pile up in `waiting` | 5min warn, 10min `'unhealthy'`+exit (measured from last completion) |
+| Memory leak (RSS climbing past 2GB) | undetected on bare workers | watchdog default 2048 MB triggers `gracefulShutdown('watchdog')` |
+| Worker stalled but waiting jobs are unhandled type | ❌ false-positive exit (restart loop) | filter by registered handler names, no exit |
+
+Operationally: from the band-aid bash watchdog Garry deployed before this fix, fresh worker
+restart cleared 21 waiting → 0 in 2 minutes, then ran stable for 30+ min with 130 MB RSS,
+autopilot-cycles completing in 0.2–0.6s instead of timing out at 600s.
+
+### What this means for operators
+
+Add a restart policy to your bare-worker invocation BEFORE upgrading. The new behavior is
+fail-stop, not self-healing — without a restart loop, your worker will exit on the first DB
+blip and stay dead. systemd `Restart=always`, Docker `restart: always`, launchd `KeepAlive`,
+cron watchdog, supervisord `autorestart=true`. The migration walks every PM. If you're using
+`gbrain jobs supervisor`, you're already protected — the supervisor handles spawn-on-crash
+itself.
+
+The default `--max-rss` for bare workers also bumped from 0 (off) to 2048 MB. If you ran bare
+workers with intentionally large embed/import jobs, raise the limit (`--max-rss 4096`) or opt
+out (`--max-rss 0`). The migration includes per-PM unit-file edits.
+
+## To take advantage of v0.22.14
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about
+a bare worker exiting with watchdog signatures:
+
+1. **Confirm your bare-worker invocations have a restart policy:**
+   ```bash
+   # systemd
+   grep -E '^Restart=' ~/.config/systemd/user/gbrain-worker.service /etc/systemd/system/gbrain-worker.service 2>/dev/null
+   # crontab
+   crontab -l | grep "gbrain jobs work"
+   # launchctl
+   plutil -p ~/Library/LaunchAgents/com.user.gbrain-worker.plist | grep -A1 KeepAlive
+   ```
+2. **Decide on RSS posture:**
+   - Default 2048 MB matches supervisor behavior. Most bare workers fit.
+   - Embed/import jobs > 2GB? Pass `--max-rss 4096` (or higher).
+   - Intentionally unbounded? Pass `--max-rss 0`.
+3. **Walk the migration:** `skills/migrations/v0.22.14.md` has the full per-PM table and a
+   verification block.
+4. **Verify:**
+   ```bash
+   gbrain jobs stats
+   gbrain doctor --json | jq '.checks[] | select(.name == "queue_health")'
+   ```
+   Worker startup line should now read:
+   `Minion worker started (queue: default, concurrency: 3, watchdog: 2048MB, health-check: 60s)`
+   Under supervisor: the `health-check: Ns` segment is absent (supervisor handles it).
+5. **If anything fails or numbers look wrong**, file an issue at
+   https://github.com/garrytan/gbrain/issues with `gbrain doctor` output and the contents of
+   `~/.gbrain/upgrade-errors.jsonl` if it exists.
+
+### Itemized changes
+
+#### Added
+- `MinionWorkerOpts.{healthCheckInterval, stallWarnAfterMs, stallExitAfterMs, dbFailExitAfter, dbProbeTimeoutMs}` — five new tuning knobs. Defaults: 60s probe interval, 5min warn / 10min exit, 3 DB strikes, 10s per-probe timeout.
+- `MinionWorker` now extends `EventEmitter`. Emits `'unhealthy'` with `{ reason: 'db_dead', consecutiveFailures, message } | { reason: 'stalled', waitingCount, idleMinutes }`. CLI subscribes; direct API consumers without a listener inherit a fail-stop fallback that calls `process.exit(1)` to preserve pre-refactor semantics.
+- `gbrain jobs work --health-interval MS` — tune the self-health-check cadence (0 disables; rejects NaN/negative/sub-1000ms typos).
+- `gbrain jobs supervisor --health-interval MS` — same flag, same validation, same `0 = disable` contract on the supervisor's own probe.
+- `GBRAIN_SUPERVISED=1` env var on the supervisor's spawned worker child (skips the child's self-health timer to avoid double-monitoring).
+- `gbrain doctor` `queue_health` subcheck reports RSS-watchdog kills in the last 24h via exact match on `error_text = 'aborted: watchdog'` scoped to `status IN ('dead','failed')`.
+- `skills/migrations/v0.22.14.md` — full migration walkthrough with per-PM restart-policy preflight, RSS-posture decision tree, and per-system unit-file edits.
+
+#### Changed
+- **Default `--max-rss` for `gbrain jobs work`: 0 → 2048 MB.** Matches supervisor default. Catches memory-leak stalls that previously went undetected on bare workers. Opt out with `--max-rss 0`.
+- **Bare-worker behavior is now fail-stop** when the DB is unreachable or the queue stalls. Pre-v0.22.14 the worker idled silently. Now it exits and relies on the external PM (systemd, Docker, launchd, cron, supervisord) to restart cleanly.
+- Stall query at `worker.ts` filters by registered handler names (`AND name = ANY($2::text[])`) so workers don't false-positive when waiting jobs of unhandled names accumulate.
+- Stall exit threshold measured from `lastCompletionTime` (not from when the warning fired), so 5min warn / 10min exit means total idle of 10 min — not 15 min.
+- DB liveness probe wrapped in `Promise.race` against a 10s timeout so a hung `executeRaw` cannot wedge the recursive `setTimeout` chain forever.
+- `setInterval` → recursive `setTimeout` with a `running` flag throughout. Eliminates timer-callback overlap on slow probes.
+- `parseMaxRssFlag` returns `number | undefined` (was `number`) so callers distinguish absent from explicit-disable.
+- `process.env.GBRAIN_SUPERVISED` check tightened from `!!env.X` to `=== '1'` (precise contract; no fuzzy matching on `'0'` or `'false'`).
+- `MinionWorker` constructor throws when `stallExitAfterMs <= stallWarnAfterMs` so misconfigurations fail loudly at startup.
+
+#### Fixed
+- **Wedged-worker false-positive on heterogeneous queues** — workers registering only some handlers no longer interpret waiting jobs of other names as a stall. Repeated `process.exit(1)` → restart loop is gone.
+- **Hung DB probe wedge** — pre-fix, a hung `executeRaw('SELECT 1')` kept the recursive `setTimeout` from rescheduling, silently disabling the entire health monitor. Post-fix, the probe times out and counts as a failure.
+- **`--health-interval 0` no longer DB-hammers the supervisor.** Pre-fix, the documented "0 disables" contract was a lie — `setInterval(cb, 0)` schedules a tight loop. Now gated behind `> 0`.
+- **Inline `jobs submit --follow` and `jobs smoke` no longer kill the user's CLI session** on a DB blip. Both now pass `healthCheckInterval: 0` so the no-listener fallback can't trip on one-shot runs.
+- Doctor's RSS-watchdog hint matches the actual error_text signature (`'aborted: watchdog'`) instead of the wrong `'memory limit'` literal that never matched.
+
+#### For contributors
+- `MinionWorker extends EventEmitter` — if you import the class directly, the `on('unhealthy', ...)` event is now part of the public surface. The `UnhealthyReason` discriminated union is exported from `src/core/minions/worker.ts`.
+- New regression-test infrastructure in `test/minions.test.ts`: `makeProbeEngine(overrides)` is a Proxy-based engine wrapper that intercepts `SELECT 1` and the stall `count(*)` query while passing every other call through to the real PGLite engine. Useful for any future test that needs to inject DB liveness or stall semantics without mocking the entire engine surface.
+
+### Adjacent (separate PR, v0.22.15)
+
+PR #503 catches the *symptom* of one specific failure mode. The cause-side fix — `runPhaseEmbed → embed.ts → embedBatch` not honoring `signal.aborted` between OpenAI batch calls — ships in v0.22.15 (highest-priority TODO; daily wedge driver). Plumbing is documented in `TODOS.md`.
+
 ## [0.22.9] - 2026-04-29
 
 **Sync failures now tell you why, not just how many.**
