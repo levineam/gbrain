@@ -21,7 +21,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   test:
-    runs-on: ubuntu-latest-16-cores
+    # ubuntu-latest is free 2-core/7GB. Larger runners (16-cores, etc.) require
+    # a provisioned runner pool in repo settings. Falling back to default keeps
+    # the matrix shard speedup (~5-6x via parallelism) at zero cost.
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
