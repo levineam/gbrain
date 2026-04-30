@@ -1,0 +1,54 @@
+# docker-compose.ci.yml
+#
+# Local CI gate. Spins up pgvector + a bun runner that bind-mounts the repo.
+# Used by `bun run ci:local` and `bun run ci:local:diff` (see scripts/ci-local.sh).
+#
+# Both services are pulled as `image:` (no build) so `docker compose pull`
+# refreshes both. The bun version floats with `oven/bun:1` to track CI's
+# `bun-version: latest`. Named volumes isolate the Linux container's deps from
+# the host's darwin-arm64 deps and keep bun's install cache warm across runs.
+#
+# Postgres host port defaults to 5434 (avoids 5432 manual `gbrain-test-pg` and
+# 5433 commonly used by sibling projects). Override with GBRAIN_CI_PG_PORT.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: gbrain_test
+    ports:
+      - "${GBRAIN_CI_PG_PORT:-5434}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d gbrain_test"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Keep postgres data in a named volume so reruns don't pay TRUNCATE-on-empty
+    # cost; --clean in scripts/ci-local.sh tears it down for cold debugging.
+    volumes:
+      - gbrain-ci-pg-data:/var/lib/postgresql/data
+
+  runner:
+    image: oven/bun:1
+    working_dir: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/gbrain_test
+    volumes:
+      - .:/app
+      # Linux container's node_modules MUST be isolated from host darwin-arm64.
+      # Without this, container `bun install` stomps host node_modules and
+      # subsequent `bun test` on host fails with binary-incompat errors.
+      - gbrain-ci-node-modules:/app/node_modules
+      # Warm install cache across runs.
+      - gbrain-ci-bun-cache:/root/.bun/install/cache
+    # No long-running command; scripts/ci-local.sh uses `docker compose run --rm`.
+
+volumes:
+  gbrain-ci-pg-data:
+  gbrain-ci-node-modules:
+  gbrain-ci-bun-cache:
