@@ -20,3 +20,5 @@ eval/data/amara-life-v1/_cache/
 
 # claw-test E2E build cache (shim + scratch outputs)
 test/.cache/
+
+.claude/
