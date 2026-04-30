@@ -120,7 +120,7 @@ export async function runPhaseSynthesize(
         verdicts.push({ filePath: t.filePath, worth: false, reasons: ['no ANTHROPIC_API_KEY for significance judge'], cached: false });
         continue;
       }
-      const verdict = await judgeSignificance(haiku, t);
+      const verdict = await judgeSignificance(haiku, t, config.verdictModel);
       await engine.putDreamVerdict(t.filePath, t.contentHash, verdict);
       verdicts.push({ filePath: t.filePath, worth: verdict.worth_processing, reasons: verdict.reasons, cached: false });
       if (verdict.worth_processing) worthProcessing.push(t);
@@ -248,6 +248,7 @@ interface SynthConfig {
   minChars: number;
   excludePatterns: string[];
   model: string;
+  verdictModel: string;
   cooldownHours: number;
 }
 
@@ -258,6 +259,7 @@ async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig> {
   const minCharsStr = await engine.getConfig('dream.synthesize.min_chars');
   const excludeStr = await engine.getConfig('dream.synthesize.exclude_patterns');
   const model = (await engine.getConfig('dream.synthesize.model')) || 'claude-sonnet-4-6';
+  const verdictModel = (await engine.getConfig('dream.synthesize.verdict_model')) || 'claude-haiku-4-5-20251001';
   const cooldownHoursStr = await engine.getConfig('dream.synthesize.cooldown_hours');
 
   let excludePatterns: string[] = ['medical', 'therapy'];
@@ -275,6 +277,7 @@ async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig> {
     minChars: minCharsStr ? Math.max(0, parseInt(minCharsStr, 10) || 2000) : 2000,
     excludePatterns,
     model,
+    verdictModel,
     cooldownHours: cooldownHoursStr ? Math.max(0, parseInt(cooldownHoursStr, 10) || 12) : 12,
   };
 }
@@ -336,6 +339,7 @@ interface VerdictResult {
 async function judgeSignificance(
   client: JudgeClient,
   t: DiscoveredTranscript,
+  verdictModel = 'claude-haiku-4-5-20251001',
 ): Promise<VerdictResult> {
   // Truncate the transcript at 8K chars for cost control. Haiku's verdict
   // doesn't need the full body; the opening + closing sections are usually
@@ -362,7 +366,7 @@ Respond as JSON: {"worth_processing": <bool>, "reasons": ["<short>", "<short>"]}
 Two reasons max, one phrase each.`;
 
   const msg = await client.create({
-    model: 'claude-haiku-4-5-20251001',
+    model: verdictModel,
     max_tokens: 200,
     system: sys,
     messages: [{ role: 'user', content: `Transcript ${t.basename}:\n\n${trimmed}` }],

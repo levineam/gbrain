@@ -47,6 +47,27 @@ const DATE_RE = /^(\d{4}-\d{2}-\d{2})/;
 const WORD_BOUNDARY_HEURISTIC = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
 
 /**
+ * Built-in self-consumption guard: slug prefixes that indicate dream output.
+ * If a transcript contains any of these paths, it's the dream cycle's own
+ * output being fed back in — skip it to prevent infinite recursion.
+ * This is a hard-coded safety net; user-configured exclude_patterns are
+ * additive on top of this.
+ */
+const DREAM_OUTPUT_SLUGS = [
+  'wiki/personal/reflections/',
+  'wiki/originals/ideas/',
+  'wiki/personal/patterns/',
+  'dream-cycle-summaries/',
+];
+
+function isDreamOutput(content: string): boolean {
+  // Check the first 2000 chars (frontmatter + opening) for dream output markers.
+  // Full-content scan is wasteful; dream output always self-identifies early.
+  const head = content.slice(0, 2000);
+  return DREAM_OUTPUT_SLUGS.some(slug => head.includes(slug));
+}
+
+/**
  * Auto-wrap bare-word patterns in `\b<word>\b`. Power users can pass full
  * regex (e.g. `^therapy:`) which we honor verbatim. Heuristic: any input
  * that's purely alphanumeric+hyphen+underscore is treated as a bare word.
@@ -141,6 +162,7 @@ export function discoverTranscripts(opts: DiscoverOpts): DiscoveredTranscript[] 
         continue;
       }
       if (content.length < minChars) continue;
+      if (isDreamOutput(content)) continue;
       if (matchesAnyExclude(content, excludeRes)) continue;
 
       results.push({
@@ -175,6 +197,7 @@ export function readSingleTranscript(
     throw new Error(`could not read transcript at ${filePath}: ${msg}`);
   }
   if (content.length < minChars) return null;
+  if (isDreamOutput(content)) return null;
   if (matchesAnyExclude(content, excludeRes)) return null;
   const baseName = basename(filePath, '.txt');
   const dateMatch = DATE_RE.exec(baseName);

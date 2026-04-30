@@ -189,3 +189,36 @@ describe('readSingleTranscript', () => {
     expect(t!.inferredDate).toBeNull();
   });
 });
+
+describe('self-consumption guard', () => {
+  test('discoverTranscripts skips files containing dream output slug prefixes', () => {
+    makeTranscript('2026-04-25-real.txt', 'This is a real conversation transcript. ' + 'x'.repeat(3000));
+    makeTranscript('2026-04-25-dream.txt',
+      '---\ntitle: Reflection\n---\n# Some reflection\nwiki/personal/reflections/2026-04-25-foo-abc123\n' + 'x'.repeat(3000));
+    makeTranscript('2026-04-25-original.txt',
+      '---\ntitle: Idea\n---\n# Some idea\nwiki/originals/ideas/2026-04-25-bar-def456\n' + 'x'.repeat(3000));
+    makeTranscript('2026-04-25-pattern.txt',
+      '---\ntype: pattern\n---\nwiki/personal/patterns/shame-cycle\n' + 'x'.repeat(3000));
+    makeTranscript('2026-04-25-summary.txt',
+      'dream-cycle-summaries/2026-04-25 generated this page\n' + 'x'.repeat(3000));
+
+    const results = discoverTranscripts({ corpusDir: tmpDir, minChars: 1000 });
+    expect(results).toHaveLength(1);
+    expect(results[0].basename).toBe('2026-04-25-real');
+  });
+
+  test('readSingleTranscript returns null for dream output', () => {
+    const path = makeTranscript('2026-04-25-dream.txt',
+      'wiki/personal/reflections/2026-04-25-thing-abc123\n' + 'x'.repeat(3000));
+    const result = readSingleTranscript(path, { minChars: 1000 });
+    expect(result).toBeNull();
+  });
+
+  test('self-consumption guard checks only first 2000 chars (performance)', () => {
+    // Dream slug buried deep in the file should NOT trigger the guard
+    const content = 'x'.repeat(3000) + 'wiki/personal/reflections/2026-04-25-buried-abc123';
+    const path = makeTranscript('2026-04-25-deep.txt', content);
+    const result = readSingleTranscript(path, { minChars: 1000 });
+    expect(result).not.toBeNull();
+  });
+});

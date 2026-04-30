@@ -2,6 +2,35 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.23.1] - 2026-04-30
+
+**Dream cycle can't eat its own output. Verdict model is configurable.**
+
+Two fixes for the dream-cycle synthesize phase shipped in v0.23.0.
+
+### Self-consumption guard (built-in, zero config)
+
+The transcript discovery layer now auto-skips any file whose first 2000 characters contain dream output slug prefixes (`wiki/personal/reflections/`, `wiki/originals/ideas/`, `wiki/personal/patterns/`, `dream-cycle-summaries/`). This prevents the dream cycle from synthesizing its own output if transcripts ever include dream-generated pages — an infinite recursion bug that would compound with each overnight cycle.
+
+The guard is structural and always-on. User-configured `exclude_patterns` are additive on top. The 2000-char head scan keeps the cost negligible (no full-content scan).
+
+### Configurable verdict model
+
+The significance verdict model (the cheap "is this worth processing?" filter) is now configurable via `dream.synthesize.verdict_model`. Default remains `claude-haiku-4-5-20251001`. Set it if you want a stronger model for the triage pass:
+
+```bash
+gbrain config set dream.synthesize.verdict_model claude-sonnet-4-6
+```
+
+### Itemized changes
+
+#### Fixed
+- `src/core/cycle/transcript-discovery.ts`: built-in `isDreamOutput()` guard checks first 2000 chars for dream output slug prefixes. Applied in both `discoverTranscripts()` and `readSingleTranscript()`. Runs before user-configured exclude patterns.
+- `src/core/cycle/synthesize.ts`: `judgeSignificance()` now accepts a `verdictModel` parameter (default `claude-haiku-4-5-20251001`). Loaded from `dream.synthesize.verdict_model` config key via `loadSynthConfig()`.
+
+#### Tests
+- 3 new test cases in `test/cycle-synthesize.test.ts` under `self-consumption guard`: discovery skips dream output files, single-transcript returns null for dream output, deep-buried slugs don't false-positive (performance guard checks head only).
+
 ## [0.23.0] - 2026-04-26
 
 **`gbrain dream` now actually dreams. Conversation transcripts become reflections, originals, and 25-year patterns ... overnight.**
