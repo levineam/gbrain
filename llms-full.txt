@@ -56,9 +56,16 @@ writing or reviewing an operation, consult `src/core/operations.ts` for the cont
 
 ## Before shipping
 
-Run `bun test` plus the E2E lifecycle described in `./CLAUDE.md` (spin up the test
-Postgres container, run `bun run test:e2e`, tear it down). Ship via the `/ship` skill,
-not by hand.
+Easiest path: `bun run ci:local` runs the full CI gate inside Docker (gitleaks,
+unit tests with `DATABASE_URL` unset, then all 29 E2E files sequentially against a
+fresh pgvector container) and tears down. Use `bun run ci:local:diff` for the
+diff-aware subset during fast iteration on a focused branch. Requires Docker
+(Docker Desktop / OrbStack / Colima) and `gitleaks` (`brew install gitleaks`).
+
+Manual path: `bun test` plus the E2E lifecycle described in `./CLAUDE.md` (spin
+up the test Postgres container, run `bun run test:e2e`, tear it down).
+
+Ship via the `/ship` skill, not by hand.
 
 ## Privacy
 
@@ -203,6 +210,9 @@ strict behavior when unset.
 - `docs/progress-events.md` — Canonical JSON event schema reference. Stable from v0.15.2, additive only.
 - `src/core/markdown.ts` — Frontmatter parsing + body splitter. `splitBody` requires an explicit timeline sentinel (`<!-- timeline -->`, `--- timeline ---`, or `---` immediately before `## Timeline`/`## History`). Plain `---` in body text is a markdown horizontal rule, not a separator. `inferType` auto-types `/wiki/analysis/` → analysis, `/wiki/guides/` → guide, `/wiki/hardware/` → hardware, `/wiki/architecture/` → architecture, `/writing/` → writing (plus the existing people/companies/deals/etc heuristics).
 - `scripts/check-jsonb-pattern.sh` — CI grep guard. Fails the build if anyone reintroduces (a) the `${JSON.stringify(x)}::jsonb` interpolation pattern (postgres.js v3 double-encodes it), or (b) `max_stalled INTEGER NOT NULL DEFAULT 1` in any schema source file (v0.15.1 #219 regression guard — must be DEFAULT 5 to preserve SIGKILL-rescue). Wired into `bun test`.
+- `docker-compose.ci.yml` + `scripts/ci-local.sh` (v0.23.1) — Local CI gate. `bun run ci:local` spins up `pgvector/pgvector:pg16` + `oven/bun:1` with named volumes (`gbrain-ci-pg-data`, `gbrain-ci-node-modules`, `gbrain-ci-bun-cache`), runs gitleaks on host, smoke-tests `scripts/run-e2e.sh` argv handling, runs unit tests with `DATABASE_URL` unset (matches GH Actions structure), then runs all 29 E2E files sequentially. `--diff` swaps in the diff-aware selector; `--no-pull` skips upstream pulls; `--clean` nukes named volumes. Postgres host port defaults to 5434 (avoids 5432 manual `gbrain-test-pg` and 5433 sibling-project conflict); override with `GBRAIN_CI_PG_PORT=NNNN`. Stronger gate than current PR CI's 2-file Tier 1 set — closes the "push-and-wait" feedback loop pre-push.
+- `scripts/select-e2e.ts` + `scripts/e2e-test-map.ts` (v0.23.1) — Diff-aware E2E test selector. Reads three git sources (committed `origin/master...HEAD`, working-tree `HEAD`, and `git ls-files --others --exclude-standard` for untracked, NOT-gitignored files), classifies as EMPTY / DOC_ONLY / SRC. Fail-closed by design: EMPTY → all 29 files (clean branch shouldn't run nothing), DOC_ONLY (every path matches the README/CLAUDE/AGENTS/CHANGELOG/TODOS allowlist) → empty stdout, SRC → escape-hatch paths (schema, package.json, skills/) trigger all; otherwise the hand-tuned `E2E_TEST_MAP` glob → tests narrows; an unmapped src/ change still emits ALL files, never silently nothing. Pure-function exports (`selectTests`, `classify`, `matchGlob`) so it's trivial to test and fork. `bun run ci:select-e2e` prints the current selection on stdout, pipe-friendly. `test/select-e2e.test.ts` covers all 4 branches plus 3 codex regression guards (skills/, untracked files, unmapped src/) — 24 cases.
+- `scripts/run-e2e.sh` (v0.23.1 update) — Sequential E2E runner. Now accepts an optional argv-driven file list (used by `ci:local:diff` to pipe in selector output) and a `--dry-run-list` flag that prints the resolved file list and exits (used by `ci-local.sh`'s startup smoke-test). Falls back to `test/e2e/*.test.ts` when invoked with no args.
 - `scripts/llms-config.ts` + `scripts/build-llms.ts` — Generator for `llms.txt` (llmstxt.org-spec web index) + `llms-full.txt` (inlined single-fetch bundle). Curated config drives both. Run `bun run build:llms` after adding a new doc. `LLMS_REPO_BASE` env var lets forks regenerate with their own URL base. `FULL_SIZE_BUDGET` (600KB) caps the inline bundle; generator WARNs if exceeded. Committed output is not analogous to `schema-embedded.ts` (no runtime consumer); we commit for GitHub browsing and fork-safe fetching.
 - `AGENTS.md` — Local-clone entry point for non-Claude agents (Codex, Cursor, OpenClaw, Aider). Mirrors `CLAUDE.md` intent via relative links. Claude Code keeps using `CLAUDE.md`.
 - `docs/UPGRADING_DOWNSTREAM_AGENTS.md` — Patches for downstream agent skill forks to apply when upgrading. Each release appends a new section. v0.10.3 includes diffs for brain-ops, meeting-ingestion, signal-detector, enrich.
@@ -579,7 +589,21 @@ will detect drift and re-bump on the next run.
 
 ## Pre-ship requirements
 
-Before shipping (/ship) or reviewing (/review), always run the full test suite:
+Before shipping (/ship) or reviewing (/review), always run the full test suite.
+Two equivalent paths:
+
+**Path A — local CI gate (recommended, v0.23.1+):**
+- `bun run ci:local` runs the entire stack inside Docker: gitleaks (host), unit
+  tests with `DATABASE_URL` unset, and all 29 E2E files sequentially against a
+  fresh pgvector container. Stronger than PR CI's 2-file Tier 1 set; closer to
+  what nightly Tier 1 catches. Spins up + tears down postgres automatically via
+  `docker-compose.ci.yml`. Override the host port with
+  `GBRAIN_CI_PG_PORT=5435 bun run ci:local` if 5434 collides.
+- `bun run ci:local:diff` runs only the E2E files matched by the diff selector
+  (`scripts/select-e2e.ts`), falling back to all 29 on unmapped src/ paths or
+  schema/skills/package.json changes. Fast iteration during a focused branch.
+
+**Path B — manual lifecycle (still supported):**
 - `bun test` — unit tests (no database required)
 - Follow the "E2E test DB lifecycle" steps above to spin up the test DB,
   run `bun run test:e2e`, then tear it down.
@@ -2048,7 +2072,7 @@ The skills in this repo are those patterns, generalized. What took 11 days to bu
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Run `bun test` for unit tests. E2E tests: spin up Postgres with pgvector, run `bun run test:e2e`, tear down.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Run `bun test` for unit tests. For the full local CI gate (gitleaks + unit + all 29 E2E files in Docker, the same checks GH Actions runs), use `bun run ci:local` ... or `bun run ci:local:diff` for the diff-aware subset during fast iteration.
 
 PRs welcome for: new enrichment APIs, performance optimizations, additional engine backends, new skills following the conformance standard in `skills/skill-creator/SKILL.md`.
 
