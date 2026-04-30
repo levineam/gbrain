@@ -943,8 +943,40 @@ export async function registerBuiltinHandlers(worker: MinionWorker, engine: Brai
     const { performSync } = await import('./sync.ts');
     const repoPath = typeof job.data.repoPath === 'string' ? job.data.repoPath : undefined;
     const noPull = !!job.data.noPull;
+    // noEmbed defaults to true (embed is a separate job — submit `embed --stale`
+    // after sync, OR run via the autopilot cycle which has its own embed phase).
+    // Caller can opt in by passing { noEmbed: false } in job params.
     const noEmbed = job.data.noEmbed !== false;
-    const result = await performSync(engine, { repoPath, noPull, noEmbed });
+    // v0.22.13 (PR #490 CODEX-1): resolve sourceId from job param OR by looking
+    // up the sources row for repoPath. Mirrors cycle.ts:480 — without this, a
+    // multi-source brain reads the global config.sync.last_commit anchor
+    // instead of sources.last_commit, which on a regularly-GC'd repo can drop
+    // out of git history and trigger 30-min full reimports every cycle.
+    let sourceId: string | undefined =
+      typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined;
+    if (!sourceId && repoPath) {
+      try {
+        const rows = await engine.executeRaw<{ id: string }>(
+          `SELECT id FROM sources WHERE local_path = $1 LIMIT 1`,
+          [repoPath],
+        );
+        sourceId = rows[0]?.id;
+      } catch {
+        // sources table may not exist on very old brains — fall through to
+        // global config.sync.* anchor in performSync.
+      }
+    }
+    // v0.22.13 (PR #490 CODEX-4): route concurrency through the shared
+    // autoConcurrency helper instead of hardcoded 4. PGLite engines stay
+    // serial (forced 1); explicit job param wins; auto path defaults are
+    // applied inside performSync against the resolved file count.
+    const concurrencyOverride = typeof job.data.concurrency === 'number'
+      ? job.data.concurrency
+      : undefined;
+    const result = await performSync(engine, {
+      repoPath, sourceId, noPull, noEmbed,
+      concurrency: concurrencyOverride,
+    });
     return result;
   });
 
