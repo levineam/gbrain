@@ -1,9 +1,8 @@
-import { existsSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, statSync, readdirSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { join, relative } from 'path';
 import type { BrainEngine } from '../core/engine.ts';
 import { importFile } from '../core/import-file.ts';
-import { readFileSync, statSync, readdirSync } from 'fs';
 import { createInterface } from 'readline';
 import {
   buildSyncManifest,
@@ -20,6 +19,8 @@ import { errorFor, serializeError } from '../core/errors.ts';
 import type { SyncManifest } from '../core/sync.ts';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
+import { loadStorageConfig } from '../core/storage-config.ts';
+import { getDefaultSourcePath } from '../core/source-resolver.ts';
 
 export interface SyncResult {
   status: 'up_to_date' | 'synced' | 'first_sync' | 'dry_run' | 'blocked_by_failures';
@@ -839,6 +840,13 @@ export async function runSync(engine: BrainEngine, args: string[]) {
       try {
         const result = await performSync(engine, repoOpts);
         printSyncResult(result);
+        // Codex P2: --all loop must also manage .gitignore per-source. Without
+        // this, multi-source users who rely on `gbrain sync --all` never get
+        // the advertised db_only ignore rules unless they sync each repo
+        // individually.
+        if (result.status !== 'dry_run' && result.status !== 'blocked_by_failures') {
+          manageGitignore(src.local_path!, engine.kind);
+        }
       } catch (e: unknown) {
         console.error(`Error syncing ${src.name}: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -865,6 +873,18 @@ export async function runSync(engine: BrainEngine, args: string[]) {
   if (!watch) {
     const result = await performSync(engine, opts);
     printSyncResult(result);
+    // Issue #2 + eng-review pass-2 finding #1 + Codex P1: manage .gitignore ONLY
+    // on successful sync. Skip on dry-run (don't mutate disk in preview mode)
+    // and blocked_by_failures (sync state is inconsistent — defer .gitignore
+    // until next clean run). Resolve the effective repo path so the wire-up
+    // fires in the common case where the user runs `gbrain sync` without
+    // passing --repo every time.
+    if (result.status !== 'dry_run' && result.status !== 'blocked_by_failures') {
+      const effectiveRepoPath = opts.repoPath ?? (await getDefaultSourcePath(engine));
+      if (effectiveRepoPath) {
+        manageGitignore(effectiveRepoPath, engine.kind);
+      }
+    }
     return;
   }
 
@@ -880,6 +900,14 @@ export async function runSync(engine: BrainEngine, args: string[]) {
         const ts = new Date().toISOString().slice(11, 19);
         console.log(`[${ts}] Synced: +${result.added} ~${result.modified} -${result.deleted} R${result.renamed}`);
       }
+      // Same gate as non-watch: only manage .gitignore on successful sync.
+      // Same repo-resolution path so watch mode catches the implicit-resolved case.
+      if (result.status !== 'dry_run' && result.status !== 'blocked_by_failures') {
+        const effectiveRepoPath = opts.repoPath ?? (await getDefaultSourcePath(engine));
+        if (effectiveRepoPath) {
+          manageGitignore(effectiveRepoPath, engine.kind);
+        }
+      }
     } catch (e: unknown) {
       consecutiveErrors++;
       const msg = e instanceof Error ? e.message : String(e);
@@ -890,6 +918,124 @@ export async function runSync(engine: BrainEngine, args: string[]) {
       }
     }
     await new Promise(r => setTimeout(r, interval * 1000));
+  }
+}
+
+/**
+ * Auto-manage .gitignore entries for db_only directories.
+ *
+ * Caller invokes ONLY on successful sync — this function trusts that the
+ * sync's data state is consistent. See `runSync` for the gating logic.
+ *
+ * Idempotent: re-running adds no duplicate entries. The managed block has
+ * a stable comment header so it's grep-able and editable.
+ *
+ * Skipped (with actionable warning) when:
+ *   - GBRAIN_NO_GITIGNORE=1 — D23 escape hatch for shared-repo setups
+ *   - The repo is a git submodule (`.git` is a file not a directory) —
+ *     D49 lock; submodule .gitignore changes don't survive parent updates
+ *
+ * On PGLite (D4): emits a once-per-process soft-warn explaining that
+ * tiering has limited effect — but still manages the .gitignore so the
+ * config-present user gets the gitignore housekeeping.
+ *
+ * Failures (write permission denied, EROFS, etc.) are caught, warned, and
+ * swallowed (D9 lock). Sync's primary job is moving data; .gitignore
+ * management is a side effect — don't kill the main job for the side effect.
+ */
+let _pgliteTierWarned = false;
+export function __resetPGLiteTierWarn(): void {
+  _pgliteTierWarned = false;
+}
+
+export function manageGitignore(
+  repoPath: string,
+  engineKind?: 'pglite' | 'postgres',
+): void {
+  if (process.env.GBRAIN_NO_GITIGNORE === '1') {
+    return;
+  }
+
+  // D49: submodule detection. In a submodule, `.git` is a regular file
+  // (containing `gitdir: ../path/to/parent.git/modules/x`), not a directory.
+  const dotGit = join(repoPath, '.git');
+  if (existsSync(dotGit)) {
+    try {
+      if (statSync(dotGit).isFile()) {
+        console.warn(
+          `Note: skipping .gitignore management — ${repoPath} is a git submodule. ` +
+            `Add db_only directories to your parent repo's .gitignore manually.`,
+        );
+        return;
+      }
+    } catch {
+      // proceed; can't tell, default to managing
+    }
+  }
+
+  let storageConfig;
+  try {
+    storageConfig = loadStorageConfig(repoPath);
+  } catch (error) {
+    // StorageConfigError (overlap) or read error — surface, don't manage.
+    console.warn(
+      `Skipped .gitignore update: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return;
+  }
+  if (!storageConfig || storageConfig.db_only.length === 0) {
+    return;
+  }
+
+  // D4 soft-warn: storage tiering has limited effect on PGLite, but the
+  // .gitignore housekeeping still helps. Warn once per process; proceed.
+  if (engineKind === 'pglite' && !_pgliteTierWarned) {
+    _pgliteTierWarned = true;
+    console.warn(
+      `Note: storage tiering has limited effect on PGLite — pages live in your ` +
+        `local database file regardless of tier. Managing .gitignore anyway.`,
+    );
+  }
+
+  const gitignorePath = join(repoPath, '.gitignore');
+  let gitignoreContent = '';
+
+  if (existsSync(gitignorePath)) {
+    try {
+      gitignoreContent = readFileSync(gitignorePath, 'utf-8');
+    } catch (error) {
+      console.warn(
+        `Could not read ${gitignorePath} (${error instanceof Error ? error.message : String(error)}) — ` +
+          `skipping .gitignore update. Add db_only directories manually.`,
+      );
+      return;
+    }
+  }
+
+  const existingLines = new Set(gitignoreContent.split('\n').map((line) => line.trim()));
+  const linesToAdd: string[] = [];
+
+  for (const dir of storageConfig.db_only) {
+    if (!existingLines.has(dir) && !existingLines.has(`/${dir}`)) {
+      linesToAdd.push(dir);
+    }
+  }
+
+  if (linesToAdd.length === 0) return;
+
+  if (gitignoreContent && !gitignoreContent.endsWith('\n')) {
+    gitignoreContent += '\n';
+  }
+  gitignoreContent += '\n# Auto-managed by gbrain (db_only directories)\n';
+  gitignoreContent += linesToAdd.join('\n') + '\n';
+
+  try {
+    writeFileSync(gitignorePath, gitignoreContent);
+  } catch (error) {
+    console.warn(
+      `Could not update ${gitignorePath} (${error instanceof Error ? error.message : String(error)}) — ` +
+        `please add db_only directories manually:\n  ${linesToAdd.join('\n  ')}`,
+    );
   }
 }
 
