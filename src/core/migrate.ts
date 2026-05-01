@@ -1075,6 +1075,34 @@ export const MIGRATIONS: Migration[] = [
   },
   {
     version: 30,
+    name: 'dream_verdicts_table',
+    // v0.23 synthesize phase: cache for "is this transcript worth processing?"
+    // verdict from the cheap Haiku judge. Distinct from raw_data (page-scoped);
+    // transcripts aren't pages. Keyed by (file_path, content_hash) so edited
+    // transcripts re-judge automatically. Backfill re-runs hit cache instead
+    // of paying for Haiku 100x.
+    sql: `
+      CREATE TABLE IF NOT EXISTS dream_verdicts (
+        file_path        TEXT        NOT NULL,
+        content_hash     TEXT        NOT NULL,
+        worth_processing BOOLEAN     NOT NULL,
+        reasons          JSONB,
+        judged_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (file_path, content_hash)
+      );
+      DO $$
+      DECLARE
+        has_bypass BOOLEAN;
+      BEGIN
+        SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+        IF has_bypass THEN
+          ALTER TABLE dream_verdicts ENABLE ROW LEVEL SECURITY;
+        END IF;
+      END $$;
+    `,
+  },
+  {
+    version: 31,
     name: 'eval_capture_tables',
     // v0.25.0 — BrainBench-Real session capture substrate.
     // Two tables:
@@ -1094,6 +1122,11 @@ export const MIGRATIONS: Migration[] = [
     // if current_user lacks BYPASSRLS, so the migration retries cleanly after
     // operator fixes the role instead of silently bumping schema_version.
     // PGLite ignores RLS; sqlFor carries the table+index DDL only.
+    //
+    // Renumbered v30→v31 on merge with master's v0.23.0 (dream_verdicts) which
+    // claimed v30 first. Pre-existing brains that applied our v30 will see
+    // version 31 as new on next initSchema and run the IF NOT EXISTS DDL —
+    // the CREATE TABLE statements are idempotent so the rename is safe.
     sqlFor: {
       postgres: `
         DO $$
@@ -1102,7 +1135,7 @@ export const MIGRATIONS: Migration[] = [
         BEGIN
           SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
           IF NOT has_bypass THEN
-            RAISE EXCEPTION 'v30 eval_capture_tables: role % does not have BYPASSRLS privilege — cannot enable RLS safely. Re-run as postgres (or another BYPASSRLS role). The migration will retry automatically on the next initSchema call.', current_user;
+            RAISE EXCEPTION 'v31 eval_capture_tables: role % does not have BYPASSRLS privilege — cannot enable RLS safely. Re-run as postgres (or another BYPASSRLS role). The migration will retry automatically on the next initSchema call.', current_user;
           END IF;
 
           CREATE TABLE IF NOT EXISTS eval_candidates (
@@ -1134,7 +1167,7 @@ export const MIGRATIONS: Migration[] = [
           CREATE INDEX IF NOT EXISTS idx_eval_capture_failures_ts ON eval_capture_failures (ts DESC);
           ALTER TABLE eval_capture_failures ENABLE ROW LEVEL SECURITY;
 
-          RAISE NOTICE 'v30: eval_capture tables ready (role % has BYPASSRLS)', current_user;
+          RAISE NOTICE 'v31: eval_capture tables ready (role % has BYPASSRLS)', current_user;
         END $$;
       `,
       pglite: `
