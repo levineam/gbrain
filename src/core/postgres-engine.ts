@@ -1365,7 +1365,10 @@ export class PostgresEngine implements BrainEngine {
     const untils    = rowsIn.map(r => r.until_date ?? null);
     const sources   = rowsIn.map(r => r.source ?? null);
     const supersededBys = rowsIn.map(r => r.superseded_by ?? null);
-    const actives   = rowsIn.map(r => r.active ?? true);
+    // postgres-js needs boolean arrays passed as text[] then SQL-cast to boolean[],
+    // otherwise the driver mis-detects element type. Same pattern as how the
+    // existing batch methods handle bools.
+    const actives   = rowsIn.map(r => (r.active ?? true) ? 'true' : 'false');
     if (weightClamped > 0) {
       process.stderr.write(`[takes] TAKES_WEIGHT_CLAMPED: ${weightClamped} row(s) had weight outside [0,1]; clamped\n`);
     }
@@ -1376,7 +1379,7 @@ export class PostgresEngine implements BrainEngine {
       FROM unnest(
         ${pageIds}::int[], ${rowNums}::int[], ${claims}::text[], ${kinds}::text[],
         ${holders}::text[], ${weights}::real[], ${sinces}::text[], ${untils}::text[],
-        ${sources}::text[], ${supersededBys}::int[], ${actives}::boolean[]
+        ${sources}::text[], ${supersededBys}::int[], ${actives}::text[]::boolean[]
       ) AS v(page_id, row_num, claim, kind, holder, weight, since_date, until_date, source, superseded_by, active)
       ON CONFLICT (page_id, row_num) DO UPDATE SET
         claim         = EXCLUDED.claim,
