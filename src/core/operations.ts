@@ -735,35 +735,51 @@ const takes_search: Operation = {
 
 const think: Operation = {
   name: 'think',
-  description: 'Multi-hop synthesis across pages + takes + graph (v0.28). Lane-D pipeline lands incrementally; v0.28.0 ships the op surface; full synthesis ships in v0.28.1+.',
+  description: 'Multi-hop synthesis across pages + takes + graph. Pulls relevant evidence and produces a cited answer with conflict + gap analysis.',
   params: {
     question: { type: 'string', required: true, description: 'The question to think about' },
     anchor: { type: 'string', description: 'Pull the entity subgraph around this slug' },
-    rounds: { type: 'number', description: 'Multi-pass: 1 (default), N, or "auto" (v0.29+)' },
+    rounds: { type: 'number', description: 'Multi-pass: 1 (default). Round-loop scaffolding is in place; gap-driven retrieval ships in v0.29.' },
     save: { type: 'boolean', description: 'Persist a synthesis page (local-CLI only; ignored for MCP)' },
-    take: { type: 'boolean', description: 'Append a take row to the anchor page (requires --anchor)' },
+    take: { type: 'boolean', description: 'Append a take row to the anchor page (requires anchor)' },
+    model: { type: 'string', description: 'Model override (alias or full id). Falls through models.think → models.default → GBRAIN_MODEL → opus.' },
+    since: { type: 'string', description: 'Start of temporal window (YYYY-MM-DD or YYYY-MM)' },
+    until: { type: 'string', description: 'End of temporal window' },
   },
   mutating: true,
   handler: async (ctx, p) => {
-    // v0.28.0: surface the op so MCP/SDK callers can register against it.
-    // The Lane-D pipeline (gather → synthesize → cite) lands in src/core/think/
-    // and `gbrain think` CLI in src/commands/think.ts. Until then, this op
-    // returns a structured "not implemented yet" envelope so callers can
-    // detect the surface and degrade gracefully.
     const remote = ctx.remote ?? true;
-    if (remote && (p.save || p.take)) {
-      // Codex P1 #7 + privacy: remote callers cannot persist; force read-only.
-      return {
-        status: 'not_implemented',
-        question: p.question,
-        message: 'gbrain think op surface registered; pipeline implementation lands in v0.28.x (Lane D). Local CLI use only for save/take.',
-      };
+    // Codex P1 #7 + privacy: remote callers cannot persist via MCP.
+    const safeSave = remote ? false : Boolean(p.save);
+    const safeTake = remote ? false : Boolean(p.take);
+    const { runThink, persistSynthesis } = await import('./think/index.ts');
+    const result = await runThink(ctx.engine, {
+      question: String(p.question),
+      anchor: p.anchor ? String(p.anchor) : undefined,
+      rounds: typeof p.rounds === 'number' ? (p.rounds as number) : undefined,
+      save: safeSave,
+      take: safeTake,
+      model: p.model ? String(p.model) : undefined,
+      since: p.since ? String(p.since) : undefined,
+      until: p.until ? String(p.until) : undefined,
+      takesHoldersAllowList: ctx.takesHoldersAllowList,
+    });
+
+    // Persist if --save was passed locally
+    let savedSlug: string | undefined;
+    let evidenceInserted = 0;
+    if (safeSave) {
+      const persisted = await persistSynthesis(ctx.engine, result);
+      savedSlug = persisted.slug;
+      evidenceInserted = persisted.evidenceInserted;
+      for (const w of persisted.warnings) result.warnings.push(w);
     }
+
     return {
-      status: 'not_implemented',
-      question: p.question,
-      anchor: p.anchor ?? null,
-      message: 'gbrain think op surface registered; pipeline implementation lands in v0.28.x (Lane D).',
+      ...result,
+      saved_slug: savedSlug ?? null,
+      evidence_inserted: evidenceInserted,
+      remote_persisted_blocked: remote && (Boolean(p.save) || Boolean(p.take)),
     };
   },
   cliHints: { name: 'think', positional: ['question'] },
