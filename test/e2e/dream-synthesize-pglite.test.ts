@@ -255,7 +255,7 @@ describe('E2E synthesize — round-trip self-consumption guard (v0.23.2)', () =>
       // 1. Insert a reflection page in the DB the way the subagent would.
       const slug = 'wiki/personal/reflections/2026-04-30-test-roundtrip-abc123';
       await rig.engine.putPage(slug, {
-        type: 'reflection',
+        type: 'note',
         title: 'Test reflection (E2E round-trip)',
         compiled_truth: 'I noticed something. Cross-references to [Alice](people/alice).',
         timeline: '',
@@ -320,7 +320,7 @@ describe('E2E synthesize — round-trip self-consumption guard (v0.23.2)', () =>
 
       const slug = 'wiki/personal/reflections/2026-04-30-bypass-test-def456';
       await rig.engine.putPage(slug, {
-        type: 'reflection',
+        type: 'note',
         title: 'Bypass test',
         compiled_truth: 'Some content. ' + 'x '.repeat(500),
         timeline: '',
@@ -369,7 +369,7 @@ describe('E2E synthesize — round-trip self-consumption guard (v0.23.2)', () =>
       // Leaked reflection.
       const slug = 'wiki/personal/reflections/2026-04-30-mixed-ghi789';
       await rig.engine.putPage(slug, {
-        type: 'reflection',
+        type: 'note',
         title: 'Leaked',
         compiled_truth: 'leaked body. ' + 'x '.repeat(500),
         timeline: '',
