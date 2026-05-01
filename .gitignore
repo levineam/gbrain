@@ -2,7 +2,28 @@ node_modules/
 bin/
 .DS_Store
 *.log
-.env.testing
-.18a49dfd730ff378-00000000.bun-build
-.18a49f9dfb996f70-00000000.bun-build
+.env
+.env.*
+!.env.*.example
+# Bun --compile temp artifacts. Each build emits a new hash-named .bun-build
+# file in cwd; glob catches all of them.
+*.bun-build
 .gstack/
+supabase/.temp/
+.claude/skills/
+.idea
+eval/reports/
+eval/data/world-v1/world.html
+
+# BrainBench amara-life-v1 Opus cache (regenerate via eval:generate-amara-life)
+eval/data/amara-life-v1/_cache/
+
+# claw-test E2E build cache (shim + scratch outputs)
+test/.cache/
+
+.claude/
+export/
+
+# Tier 3 PGLite snapshot fixture (built on demand by build:pglite-snapshot)
+test/fixtures/pglite-snapshot.tar
+test/fixtures/pglite-snapshot.version
