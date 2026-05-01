@@ -70,8 +70,27 @@ DATABASE_URL=postgresql://... bun run test:e2e
 Use `bun run test` before pushing. The guard chain catches: banned fork-name leaks
 (`scripts/check-privacy.sh`), `JSON.stringify(x)::jsonb` interpolation patterns
 (`scripts/check-jsonb-pattern.sh`), `\r` progress bleed to stdout
-(`scripts/check-progress-to-stdout.sh`), and silent fallback to recursive chunking
-in the compiled binary (`scripts/check-wasm-embedded.sh`).
+(`scripts/check-progress-to-stdout.sh`), trailing-newline drift across tracked
+files (`scripts/check-trailing-newline.sh`), and silent fallback to recursive
+chunking in the compiled binary (`scripts/check-wasm-embedded.sh`).
+
+### Local CI gate (recommended before pushing, v0.23.1+)
+
+```bash
+bun run ci:local         # full gate: gitleaks + unit + ALL 29 E2E files (sequential)
+bun run ci:local:diff    # gate with diff-aware E2E selector
+bun run ci:select-e2e    # print which E2E files the selector would run
+```
+
+`ci:local` spins up `pgvector/pgvector:pg16` + `oven/bun:1` via
+`docker-compose.ci.yml`, runs everything PR CI runs plus the full E2E suite, then
+tears down. Named volumes keep the install warm across runs (~16-20 min sequential
+E2E after the first cold pull). Requires Docker (Docker Desktop, OrbStack, or
+Colima) and `gitleaks` on host (`brew install gitleaks`). Override the postgres
+host port with `GBRAIN_CI_PG_PORT=5435 bun run ci:local` if 5434 collides.
+
+Fail-closed selector: an unmapped `src/` change runs all 29 E2E files. Hand-tune
+narrower mappings via `scripts/e2e-test-map.ts`.
 
 ## Building
 
