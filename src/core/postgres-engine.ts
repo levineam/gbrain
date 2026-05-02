@@ -1,5 +1,5 @@
 import postgres from 'postgres';
-import type { BrainEngine, LinkBatchInput, TimelineBatchInput, ReservedConnection } from './engine.ts';
+import type { BrainEngine, LinkBatchInput, TimelineBatchInput, ReservedConnection, DreamVerdict, DreamVerdictInput } from './engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
 import { runMigrations } from './migrate.ts';
 import { SCHEMA_SQL } from './schema-embedded.ts';
@@ -15,6 +15,8 @@ import type {
   BrainStats, BrainHealth,
   IngestLogEntry, IngestLogInput,
   EngineConfig,
+  EvalCandidate, EvalCandidateInput,
+  EvalCaptureFailure, EvalCaptureFailureReason,
 } from './types.ts';
 import { GBrainError } from './types.ts';
 import * as db from './db.ts';
@@ -334,11 +336,17 @@ export class PostgresEngine implements BrainEngine {
     const tagJoin = filters?.tag ? sql`JOIN tags t ON t.page_id = p.id` : sql``;
     const tagCondition = filters?.tag ? sql`AND t.tag = ${filters.tag}` : sql``;
     const updatedCondition = updatedAfter ? sql`AND p.updated_at > ${updatedAfter}::timestamptz` : sql``;
+    // slugPrefix uses the (source_id, slug) UNIQUE btree index for range scans.
+    // Escape LIKE metacharacters so the user prefix is treated as a literal.
+    const slugPrefix = filters?.slugPrefix;
+    const slugCondition = slugPrefix
+      ? sql`AND p.slug LIKE ${slugPrefix.replace(/[\\%_]/g, (c) => '\\' + c) + '%'} ESCAPE '\\'`
+      : sql``;
 
     const rows = await sql`
       SELECT p.* FROM pages p
       ${tagJoin}
-      WHERE 1=1 ${typeCondition} ${tagCondition} ${updatedCondition}
+      WHERE 1=1 ${typeCondition} ${tagCondition} ${updatedCondition} ${slugCondition}
       ORDER BY p.updated_at DESC LIMIT ${limit} OFFSET ${offset}
     `;
 
@@ -1297,6 +1305,39 @@ export class PostgresEngine implements BrainEngine {
     return rows as unknown as RawData[];
   }
 
+  // Dream-cycle significance verdict cache (v0.23).
+  async getDreamVerdict(filePath: string, contentHash: string): Promise<DreamVerdict | null> {
+    const sql = this.sql;
+    const rows = await sql<Array<{
+      worth_processing: boolean;
+      reasons: string[] | null;
+      judged_at: Date;
+    }>>`
+      SELECT worth_processing, reasons, judged_at
+      FROM dream_verdicts
+      WHERE file_path = ${filePath} AND content_hash = ${contentHash}
+    `;
+    if (rows.length === 0) return null;
+    const r = rows[0];
+    return {
+      worth_processing: r.worth_processing,
+      reasons: r.reasons ?? [],
+      judged_at: r.judged_at instanceof Date ? r.judged_at.toISOString() : String(r.judged_at),
+    };
+  }
+
+  async putDreamVerdict(filePath: string, contentHash: string, verdict: DreamVerdictInput): Promise<void> {
+    const sql = this.sql;
+    await sql`
+      INSERT INTO dream_verdicts (file_path, content_hash, worth_processing, reasons)
+      VALUES (${filePath}, ${contentHash}, ${verdict.worth_processing}, ${sql.json(verdict.reasons as Parameters<typeof sql.json>[0])})
+      ON CONFLICT (file_path, content_hash) DO UPDATE SET
+        worth_processing = EXCLUDED.worth_processing,
+        reasons = EXCLUDED.reasons,
+        judged_at = now()
+    `;
+  }
+
   // Versions
   async createVersion(slug: string): Promise<PageVersion> {
     const sql = this.sql;
@@ -1698,6 +1739,74 @@ export class PostgresEngine implements BrainEngine {
     return [...chunkRows, ...symbolRows].map(r => pgRowToCodeEdge(r as Record<string, unknown>));
   }
 
+  // Eval capture (v0.25.0). See BrainEngine interface docs.
+  async logEvalCandidate(input: EvalCandidateInput): Promise<number> {
+    const sql = this.sql;
+    const rows = await sql`
+      INSERT INTO eval_candidates (
+        tool_name, query, retrieved_slugs, retrieved_chunk_ids, source_ids,
+        expand_enabled, detail, detail_resolved, vector_enabled, expansion_applied,
+        latency_ms, remote, job_id, subagent_id
+      ) VALUES (
+        ${input.tool_name}, ${input.query}, ${input.retrieved_slugs}, ${input.retrieved_chunk_ids}, ${input.source_ids},
+        ${input.expand_enabled}, ${input.detail}, ${input.detail_resolved}, ${input.vector_enabled}, ${input.expansion_applied},
+        ${input.latency_ms}, ${input.remote}, ${input.job_id}, ${input.subagent_id}
+      )
+      RETURNING id
+    `;
+    return rows[0]!.id as number;
+  }
+
+  async listEvalCandidates(filter?: { since?: Date; limit?: number; tool?: 'query' | 'search' }): Promise<EvalCandidate[]> {
+    const sql = this.sql;
+    const raw = filter?.limit;
+    const limit = (raw === undefined || raw === null || !Number.isFinite(raw) || raw <= 0)
+      ? 1000
+      : Math.min(Math.floor(raw), 100000);
+    const since = filter?.since ?? new Date(0);
+    const tool = filter?.tool ?? null;
+    // id DESC tiebreaker so same-millisecond inserts return deterministically
+    // — without this, `gbrain eval export --since` could dupe or miss rows
+    // across non-overlapping windows.
+    const rows = tool
+      ? await sql`
+          SELECT * FROM eval_candidates
+          WHERE created_at >= ${since} AND tool_name = ${tool}
+          ORDER BY created_at DESC, id DESC
+          LIMIT ${limit}
+        `
+      : await sql`
+          SELECT * FROM eval_candidates
+          WHERE created_at >= ${since}
+          ORDER BY created_at DESC, id DESC
+          LIMIT ${limit}
+        `;
+    return rows as unknown as EvalCandidate[];
+  }
+
+  async deleteEvalCandidatesBefore(date: Date): Promise<number> {
+    const sql = this.sql;
+    const rows = await sql`
+      DELETE FROM eval_candidates WHERE created_at < ${date} RETURNING id
+    `;
+    return rows.length;
+  }
+
+  async logEvalCaptureFailure(reason: EvalCaptureFailureReason): Promise<void> {
+    const sql = this.sql;
+    await sql`INSERT INTO eval_capture_failures (reason) VALUES (${reason})`;
+  }
+
+  async listEvalCaptureFailures(filter?: { since?: Date }): Promise<EvalCaptureFailure[]> {
+    const sql = this.sql;
+    const since = filter?.since ?? new Date(0);
+    const rows = await sql`
+      SELECT * FROM eval_capture_failures
+      WHERE ts >= ${since}
+      ORDER BY ts DESC
+    `;
+    return rows as unknown as EvalCaptureFailure[];
+  }
 }
 
 function pgRowToCodeEdge(row: Record<string, unknown>): import('./types.ts').CodeEdgeResult {

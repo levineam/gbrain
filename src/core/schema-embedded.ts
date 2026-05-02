@@ -642,6 +642,22 @@ CREATE TABLE IF NOT EXISTS subagent_rate_leases (
 CREATE INDEX IF NOT EXISTS idx_rate_leases_key_expires ON subagent_rate_leases (key, expires_at);
 
 -- ============================================================
+-- Dream-cycle significance verdict cache — v0.21 synthesize phase
+-- ============================================================
+-- Caches the cheap Haiku "is this transcript worth processing?" verdict
+-- per (file_path, content_hash) so backfill re-runs skip already-judged
+-- files. Distinct from raw_data (which is page-scoped); transcripts
+-- aren't pages.
+CREATE TABLE IF NOT EXISTS dream_verdicts (
+  file_path        TEXT        NOT NULL,
+  content_hash     TEXT        NOT NULL,
+  worth_processing BOOLEAN     NOT NULL,
+  reasons          JSONB,
+  judged_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (file_path, content_hash)
+);
+
+-- ============================================================
 -- Cycle coordination lock — v0.17 runCycle primitive
 -- ============================================================
 -- One row per active cycle. Any caller (autopilot daemon, Minions
@@ -658,6 +674,42 @@ CREATE TABLE IF NOT EXISTS gbrain_cycle_locks (
   ttl_expires_at  TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_cycle_locks_ttl ON gbrain_cycle_locks(ttl_expires_at);
+
+-- ============================================================
+-- Eval capture (v0.25.0 — BrainBench-Real substrate)
+-- ============================================================
+-- eval_candidates: captured query/search calls from the op-layer wrapper
+-- in src/core/operations.ts. PII is scrubbed before insert by
+-- src/core/eval-capture-scrub.ts. query is CHECK-capped at 50KB.
+-- eval_capture_failures: cross-process audit of insert failures, surfaced
+-- by \`gbrain doctor\` (in-process counters can't bridge MCP server + doctor
+-- CLI process boundaries).
+CREATE TABLE IF NOT EXISTS eval_candidates (
+  id                    SERIAL PRIMARY KEY,
+  tool_name             TEXT         NOT NULL CHECK (tool_name IN ('query', 'search')),
+  query                 TEXT         NOT NULL CHECK (length(query) <= 51200),
+  retrieved_slugs       TEXT[]       NOT NULL DEFAULT '{}',
+  retrieved_chunk_ids   INTEGER[]    NOT NULL DEFAULT '{}',
+  source_ids            TEXT[]       NOT NULL DEFAULT '{}',
+  expand_enabled        BOOLEAN,
+  detail                TEXT         CHECK (detail IS NULL OR detail IN ('low', 'medium', 'high')),
+  detail_resolved       TEXT         CHECK (detail_resolved IS NULL OR detail_resolved IN ('low', 'medium', 'high')),
+  vector_enabled        BOOLEAN      NOT NULL,
+  expansion_applied     BOOLEAN      NOT NULL,
+  latency_ms            INTEGER      NOT NULL,
+  remote                BOOLEAN      NOT NULL,
+  job_id                INTEGER,
+  subagent_id           INTEGER,
+  created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_eval_candidates_created_at ON eval_candidates(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS eval_capture_failures (
+  id      SERIAL       PRIMARY KEY,
+  ts      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  reason  TEXT         NOT NULL CHECK (reason IN ('db_down', 'rls_reject', 'check_violation', 'scrubber_exception', 'other'))
+);
+CREATE INDEX IF NOT EXISTS idx_eval_capture_failures_ts ON eval_capture_failures(ts DESC);
 
 -- NOTIFY trigger for real-time job events (Postgres only, not PGLite)
 CREATE OR REPLACE FUNCTION notify_minion_job_change() RETURNS trigger AS \$\$
@@ -708,7 +760,10 @@ BEGIN
     ALTER TABLE subagent_tool_executions ENABLE ROW LEVEL SECURITY;
     ALTER TABLE subagent_rate_leases ENABLE ROW LEVEL SECURITY;
     ALTER TABLE gbrain_cycle_locks ENABLE ROW LEVEL SECURITY;
-    -- v0.26.0 OAuth 2.1 tables
+    ALTER TABLE dream_verdicts ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE eval_candidates ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE eval_capture_failures ENABLE ROW LEVEL SECURITY;
+    -- v0.26 OAuth 2.1 tables
     ALTER TABLE oauth_clients ENABLE ROW LEVEL SECURITY;
     ALTER TABLE oauth_tokens ENABLE ROW LEVEL SECURITY;
     ALTER TABLE oauth_codes ENABLE ROW LEVEL SECURITY;

@@ -8,6 +8,8 @@ The brain wires itself. Every page write extracts entity references and creates 
 
 GBrain is those patterns, generalized. 29 skills. Install in 30 minutes. Your agent does the work. As Garry's personal agent gets smarter, so does yours.
 
+**New in v0.25.0 — BrainBench-Real (session capture, contributor opt-in):** with `GBRAIN_CONTRIBUTOR_MODE=1` set in your shell, every real `query` + `search` call through MCP, CLI, or the subagent tool-bridge gets captured (PII-scrubbed) into an `eval_candidates` table. Snapshot with `gbrain eval export`, replay against your code change with `gbrain eval replay`. Three numbers come back: mean Jaccard@k between captured and current retrieved slugs, top-1 stability, and latency Δ. **Off by default** for production users — no surprise data accumulation. Walkthrough: [docs/eval-bench.md](docs/eval-bench.md). NDJSON wire format: [docs/eval-capture.md](docs/eval-capture.md).
+
 > **~30 minutes to a fully working brain.** Database ready in 2 seconds (PGLite, no server). You just answer questions about API keys.
 
 > **LLMs:** fetch [`llms.txt`](llms.txt) for the documentation map, or [`llms-full.txt`](llms-full.txt) for the same map with core docs inlined in one fetch. **Agents:** start with [`AGENTS.md`](AGENTS.md) (or [`CLAUDE.md`](CLAUDE.md) if you're Claude Code).
@@ -152,7 +154,7 @@ GBrain ships 29 skills organized by `skills/RESOLVER.md` (or your OpenClaw's `AG
 |-------|-------------|
 | **enrich** | Tiered enrichment (Tier 1/2/3). Creates and updates person/company pages with compiled truth and timelines. |
 | **query** | 3-layer search with synthesis and citations. Says "the brain doesn't have info on X" instead of hallucinating. |
-| **maintain** | Periodic health: stale pages, orphans, dead links, citation audit, back-link enforcement, tag consistency. |
+| **maintain** | Periodic health: stale pages, orphans, dead links, citation audit, back-link enforcement, tag consistency. v0.23 adds the dream cycle's synthesize + patterns phases ... overnight conversation transcripts become reflections, originals, and 25-year patterns. |
 | **citation-fixer** | Scans pages for missing or malformed citations. Fixes format to match the standard. |
 | **repo-architecture** | Where new brain files go. Decision protocol: primary subject determines directory, not format. |
 | **publish** | Share brain pages as password-protected HTML. Zero LLM calls. |
@@ -336,9 +338,11 @@ is what you spend time on. Everything else is boilerplate the CLI writes for you
 
 Drop a `routing-eval.jsonl` fixture next to any skill. Each line is `{intent, expected_skill,
 ambiguous_with?}`. `gbrain check-resolvable` runs the structural layer by default; `gbrain
-routing-eval --llm` runs an LLM tie-break layer for CI. False positives (wrong skill matched),
-missed routes (no skill matched), and tautological fixtures (intent copies trigger verbatim)
-all surface as specific advisories with the exact file:line to fix.
+routing-eval` runs the same structural layer as a dedicated CI verb. The `--llm` flag is
+accepted as a placeholder for a future LLM tie-break layer; in this release it emits a stderr
+notice and runs structural only. False positives (wrong skill matched), missed routes (no
+skill matched), and tautological fixtures (intent copies trigger verbatim) all surface as
+specific advisories with the exact file:line to fix.
 
 ### Works on your OpenClaw, not just gbrain's repo
 
@@ -375,10 +379,38 @@ gbrain skillpack diff brain-ops                # compare bundle vs your local co
 
 Re-running is safe. The managed-block markers in your AGENTS.md let `skillpack install`
 accumulate rows across separate single-skill installs instead of overwriting each other.
+A receipt comment inside the fence (`<!-- gbrain:skillpack:manifest cumulative-slugs="..." -->`)
+tracks what gbrain has installed across runs. `install --all` is the only path that prunes;
+per-skill install never deletes what it didn't install. If you hand-add a row inside the fence,
+gbrain preserves it on reinstall and emits a stderr notice telling your agent to investigate.
 
 **Skillify is the piece that makes the skills tree survive six months of compounding work.**
 Read [`skills/skillify/SKILL.md`](skills/skillify/SKILL.md) for the full 10-item checklist
 and the anti-patterns it catches.
+
+## Storage tiering: keep bulk content out of git (v0.22.11)
+
+When your brain crosses 100K files and bulk machine-generated content (tweets, articles, transcripts)
+becomes the size driver, declare which directories belong in git and which live in the database only.
+
+```yaml
+# gbrain.yml at the brain repo root
+storage:
+  db_tracked:
+    - people/
+    - companies/
+    - deals/
+  db_only:
+    - media/x/
+    - media/articles/
+    - meetings/transcripts/
+```
+
+`gbrain sync` auto-manages your `.gitignore` for `db_only` paths. `gbrain export --restore-only --repo .`
+repopulates missing files from the database (container restart, fresh clone, accidental rm).
+`gbrain storage status` shows the tier breakdown.
+
+Full guide: [docs/storage-tiering.md](docs/storage-tiering.md).
 
 ## Getting Data In
 
@@ -635,8 +667,11 @@ SEARCH
   gbrain query <question>              Hybrid search (vector + keyword + RRF)
 
 IMPORT
-  gbrain import <dir> [--no-embed]      Import markdown (idempotent)
-  gbrain sync [--repo <path>]           Git-to-brain incremental sync
+  gbrain import <dir> [--no-embed] [--workers N]
+                                        Import markdown (idempotent)
+  gbrain sync [--repo <path>] [--workers N]
+                                        Git-to-brain incremental sync
+                                        (>100-file diffs auto-parallelize 4 workers on Postgres)
   gbrain export [--dir ./out/]          Export to markdown
 
 FILES
@@ -689,7 +724,11 @@ ADMIN
   # programmatically via oauthProvider.registerClientManual() for host-repo wrappers.
   gbrain integrations                   Integration recipe dashboard
   gbrain sources list|add|remove|...    Multi-source brain management (v0.18)
-  gbrain dream [--dry-run] [--phase N]  One maintenance cycle then exit (cron-friendly)
+  gbrain dream [--dry-run] [--phase N]  8-phase maintenance cycle (lint→backlinks→sync→synthesize
+                                        →extract→patterns→embed→orphans). v0.23 added synthesize +
+                                        patterns: transcripts → reflections + cross-session themes.
+  gbrain dream --input <file>           Ad-hoc transcript synthesis (implies --phase synthesize)
+  gbrain dream --date YYYY-MM-DD        Synthesize a single day; --from/--to for backfill ranges
   gbrain check-backlinks check|fix      Back-link enforcement
   gbrain lint [--fix]                   LLM artifact detection
   gbrain repair-jsonb [--dry-run]       Repair v0.12.0 double-encoded JSONB (Postgres)
@@ -732,7 +771,9 @@ The skills in this repo are those patterns, generalized. What took 11 days to bu
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Run `bun test` for unit tests. E2E tests: spin up Postgres with pgvector, run `bun run test:e2e`, tear down.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Run `bun test` for unit tests. For the full local CI gate (gitleaks + unit + all 29 E2E files in Docker, the same checks GH Actions runs), use `bun run ci:local` ... or `bun run ci:local:diff` for the diff-aware subset during fast iteration.
+
+If you're working on retrieval or any of the search/embedding/ranking surface, set `GBRAIN_CONTRIBUTOR_MODE=1` in your shell rc and use `gbrain eval replay` to gate your changes against a snapshot of real captured queries — the dev loop is documented in [`docs/eval-bench.md`](docs/eval-bench.md). Capture is **off by default** for production users (no surprise data accumulation); the env var is the contributor opt-in.
 
 PRs welcome for: new enrichment APIs, performance optimizations, additional engine backends, new skills following the conformance standard in `skills/skill-creator/SKILL.md`.
 

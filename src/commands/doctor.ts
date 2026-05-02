@@ -719,6 +719,58 @@ export async function runDoctor(engine: BrainEngine | null, args: string[], dbSo
     fmHb();
   }
 
+  // 11a-bis. Eval-capture health (v0.25.0). Capture is a fire-and-forget
+  // side-effect that logs failures to a persistent table so this check
+  // can see drops cross-process (the MCP server captures; `gbrain doctor`
+  // runs in a separate process). Counts failures in the last 24h and
+  // warns when non-zero. Pre-v31 brains: the table doesn't exist yet;
+  // swallow the error and report skipped.
+  progress.heartbeat('eval_capture');
+  try {
+    const since = new Date(Date.now() - 24 * 3600 * 1000);
+    const failures = await engine.listEvalCaptureFailures({ since });
+    if (failures.length === 0) {
+      checks.push({ name: 'eval_capture', status: 'ok', message: 'No capture failures in the last 24h' });
+    } else {
+      const byReason = new Map<string, number>();
+      for (const f of failures) {
+        byReason.set(f.reason, (byReason.get(f.reason) ?? 0) + 1);
+      }
+      const breakdown = [...byReason.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([r, n]) => `${n} ${r}`)
+        .join(', ');
+      checks.push({
+        name: 'eval_capture',
+        status: 'warn',
+        message: `${failures.length} capture failure(s) in the last 24h (${breakdown}). ` +
+          `If you care about replay fidelity, investigate. If not, set eval.capture: false ` +
+          `in ~/.gbrain/config.json to silence.`,
+      });
+    }
+  } catch (err) {
+    // Distinguish "table doesn't exist yet" (pre-v31, ok skip) from real
+    // problems like RLS denying SELECT — the latter masks the very condition
+    // this check is supposed to surface (capture INSERTs almost certainly
+    // also fail).
+    const code = (err as { code?: string } | null)?.code;
+    if (code === '42P01') {
+      checks.push({ name: 'eval_capture', status: 'ok', message: 'Skipped (eval_capture_failures table unavailable — apply migrations or upgrade)' });
+    } else if (code === '42501') {
+      checks.push({
+        name: 'eval_capture',
+        status: 'warn',
+        message: 'RLS denies SELECT on eval_capture_failures. Capture INSERTs are almost certainly failing too. Run as a role with BYPASSRLS or grant SELECT on this table.',
+      });
+    } else {
+      checks.push({
+        name: 'eval_capture',
+        status: 'warn',
+        message: `Could not read eval_capture_failures: ${(err as Error)?.message ?? String(err)}`,
+      });
+    }
+  }
+
   // 11b. Queue health (v0.19.1 queue-resilience wave).
   // Postgres-only because PGLite has no multi-process worker surface. Two
   // subchecks, both cheap (single SELECT each, status-index-covered):
@@ -774,6 +826,30 @@ export async function runDoctor(engine: BrainEngine | null, args: string[], dbSo
          ORDER BY depth DESC
          LIMIT 5
       `;
+      // Subcheck 3 (v0.22.14): RSS-watchdog kills in the last 24h. Bare workers
+      // newly default to --max-rss 2048 (was 0); operators who run large embed
+      // or import jobs may see kills that didn't happen pre-v0.22.14. We surface
+      // a hint when this signature appears so the upgrade path is obvious.
+      // Signature: when the watchdog trips, gracefulShutdown('watchdog') aborts
+      // in-flight jobs with `new Error('watchdog')`. The worker's failJob path
+      // (worker.ts:660-664) writes `error_text = 'aborted: watchdog'` for any
+      // job in-flight at the moment of the kill.
+      //
+      // We deliberately DO NOT do a loose `ILIKE '%watchdog%'`:
+      //   1. Parent jobs that inherit `on_child_fail='fail_parent'` get
+      //      `"child job N failed: aborted: watchdog"` — counting that
+      //      double-counts (child + parent) for one watchdog event.
+      //   2. Any user error_text containing the word "watchdog" matches.
+      // Match the exact prefix `'aborted: watchdog'` to scope this purely to
+      // the worker's own kill signature.
+      const rssKillRows: Array<{ cnt: number }> = await sql`
+        SELECT count(*)::int AS cnt
+          FROM minion_jobs
+         WHERE status IN ('dead', 'failed')
+           AND finished_at > now() - interval '24 hours'
+           AND error_text = 'aborted: watchdog'
+      `;
+      const rssKillCount = rssKillRows[0]?.cnt ?? 0;
 
       const problems: string[] = [];
       if (stalledRows.length > 0) {
@@ -792,6 +868,14 @@ export async function runDoctor(engine: BrainEngine | null, args: string[], dbSo
         problems.push(
           `waiting-queue depth exceeds ${threshold} for: ${sample}. ` +
           `Fix: set maxWaiting on the submitter (or raise GBRAIN_QUEUE_WAITING_THRESHOLD).`
+        );
+      }
+      if (rssKillCount > 0) {
+        problems.push(
+          `${rssKillCount} job(s) dead-lettered for RSS-watchdog memory-limit kills in last 24h. ` +
+          `v0.22.14 changed the bare-worker --max-rss default from 0 (off) to 2048 MB. ` +
+          `Fix: raise the limit (e.g. \`gbrain jobs work --max-rss 4096\`) or opt out (\`--max-rss 0\`). ` +
+          `See skills/migrations/v0.22.14.md.`
         );
       }
 

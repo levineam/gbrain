@@ -1075,12 +1075,142 @@ export const MIGRATIONS: Migration[] = [
   },
   {
     version: 30,
+    name: 'dream_verdicts_table',
+    // v0.23 synthesize phase: cache for "is this transcript worth processing?"
+    // verdict from the cheap Haiku judge. Distinct from raw_data (page-scoped);
+    // transcripts aren't pages. Keyed by (file_path, content_hash) so edited
+    // transcripts re-judge automatically. Backfill re-runs hit cache instead
+    // of paying for Haiku 100x.
+    sql: `
+      CREATE TABLE IF NOT EXISTS dream_verdicts (
+        file_path        TEXT        NOT NULL,
+        content_hash     TEXT        NOT NULL,
+        worth_processing BOOLEAN     NOT NULL,
+        reasons          JSONB,
+        judged_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (file_path, content_hash)
+      );
+      DO $$
+      DECLARE
+        has_bypass BOOLEAN;
+      BEGIN
+        SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+        IF has_bypass THEN
+          ALTER TABLE dream_verdicts ENABLE ROW LEVEL SECURITY;
+        END IF;
+      END $$;
+    `,
+  },
+  {
+    version: 31,
+    name: 'eval_capture_tables',
+    // v0.25.0 — BrainBench-Real session capture substrate.
+    // Two tables:
+    //   eval_candidates: per-call capture from the op-layer wrapper around
+    //     `query` and `search`. Captures MCP + CLI + subagent tool-bridge
+    //     traffic via src/core/operations.ts. query column is CHECK-capped
+    //     at 50KB; PII is scrubbed before insert by src/core/eval-capture-scrub.ts.
+    //     remote distinguishes MCP callers (untrusted) from local CLI; job_id +
+    //     subagent_id let gbrain-evals partition replay by run.
+    //   eval_capture_failures: insert-side audit trail. When logEvalCandidate
+    //     fails (DB down, RLS reject, CHECK violation, scrubber exception),
+    //     the capture path records the reason here so `gbrain doctor` can
+    //     surface silent drops cross-process. In-process counters don't work
+    //     because doctor runs in a separate process from the MCP server.
+    //
+    // RLS enable matches the v24 / v29 posture: fail loudly via RAISE EXCEPTION
+    // if current_user lacks BYPASSRLS, so the migration retries cleanly after
+    // operator fixes the role instead of silently bumping schema_version.
+    // PGLite ignores RLS; sqlFor carries the table+index DDL only.
+    //
+    // Renumbered v30→v31 on merge with master's v0.23.0 (dream_verdicts) which
+    // claimed v30 first. Pre-existing brains that applied our v30 will see
+    // version 31 as new on next initSchema and run the IF NOT EXISTS DDL —
+    // the CREATE TABLE statements are idempotent so the rename is safe.
+    sqlFor: {
+      postgres: `
+        DO $$
+        DECLARE
+          has_bypass BOOLEAN;
+        BEGIN
+          SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+          IF NOT has_bypass THEN
+            RAISE EXCEPTION 'v31 eval_capture_tables: role % does not have BYPASSRLS privilege — cannot enable RLS safely. Re-run as postgres (or another BYPASSRLS role). The migration will retry automatically on the next initSchema call.', current_user;
+          END IF;
+
+          CREATE TABLE IF NOT EXISTS eval_candidates (
+            id SERIAL PRIMARY KEY,
+            tool_name TEXT NOT NULL CHECK (tool_name IN ('query', 'search')),
+            query TEXT NOT NULL CHECK (length(query) <= 51200),
+            retrieved_slugs TEXT[] NOT NULL DEFAULT '{}',
+            retrieved_chunk_ids INTEGER[] NOT NULL DEFAULT '{}',
+            source_ids TEXT[] NOT NULL DEFAULT '{}',
+            expand_enabled BOOLEAN,
+            detail TEXT CHECK (detail IS NULL OR detail IN ('low', 'medium', 'high')),
+            detail_resolved TEXT CHECK (detail_resolved IS NULL OR detail_resolved IN ('low', 'medium', 'high')),
+            vector_enabled BOOLEAN NOT NULL,
+            expansion_applied BOOLEAN NOT NULL,
+            latency_ms INTEGER NOT NULL,
+            remote BOOLEAN NOT NULL,
+            job_id INTEGER,
+            subagent_id INTEGER,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          );
+          CREATE INDEX IF NOT EXISTS idx_eval_candidates_created_at ON eval_candidates (created_at DESC);
+          ALTER TABLE eval_candidates ENABLE ROW LEVEL SECURITY;
+
+          CREATE TABLE IF NOT EXISTS eval_capture_failures (
+            id SERIAL PRIMARY KEY,
+            ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            reason TEXT NOT NULL CHECK (reason IN ('db_down', 'rls_reject', 'check_violation', 'scrubber_exception', 'other'))
+          );
+          CREATE INDEX IF NOT EXISTS idx_eval_capture_failures_ts ON eval_capture_failures (ts DESC);
+          ALTER TABLE eval_capture_failures ENABLE ROW LEVEL SECURITY;
+
+          RAISE NOTICE 'v31: eval_capture tables ready (role % has BYPASSRLS)', current_user;
+        END $$;
+      `,
+      pglite: `
+        CREATE TABLE IF NOT EXISTS eval_candidates (
+          id SERIAL PRIMARY KEY,
+          tool_name TEXT NOT NULL CHECK (tool_name IN ('query', 'search')),
+          query TEXT NOT NULL CHECK (length(query) <= 51200),
+          retrieved_slugs TEXT[] NOT NULL DEFAULT '{}',
+          retrieved_chunk_ids INTEGER[] NOT NULL DEFAULT '{}',
+          source_ids TEXT[] NOT NULL DEFAULT '{}',
+          expand_enabled BOOLEAN,
+          detail TEXT CHECK (detail IS NULL OR detail IN ('low', 'medium', 'high')),
+          detail_resolved TEXT CHECK (detail_resolved IS NULL OR detail_resolved IN ('low', 'medium', 'high')),
+          vector_enabled BOOLEAN NOT NULL,
+          expansion_applied BOOLEAN NOT NULL,
+          latency_ms INTEGER NOT NULL,
+          remote BOOLEAN NOT NULL,
+          job_id INTEGER,
+          subagent_id INTEGER,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_eval_candidates_created_at ON eval_candidates (created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS eval_capture_failures (
+          id SERIAL PRIMARY KEY,
+          ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          reason TEXT NOT NULL CHECK (reason IN ('db_down', 'rls_reject', 'check_violation', 'scrubber_exception', 'other'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_eval_capture_failures_ts ON eval_capture_failures (ts DESC);
+      `,
+    },
+    sql: '',
+  },
+  {
+    version: 32,
     name: 'oauth_infrastructure',
-    // OAuth 2.1 tables for `gbrain serve --http`. Supports client credentials,
-    // authorization code + PKCE, and refresh token rotation. Bumped from v25
-    // to v30 to land after master's v25-v29 (page_kind / code metadata /
-    // cathedral_ii foundation + RLS) — OAuth is independent of the code-graph
-    // chain so ordering doesn't matter beyond version ledger correctness.
+    // v0.26 OAuth 2.1 tables for `gbrain serve --http`. Supports client credentials,
+    // authorization code + PKCE, and refresh token rotation. Renumbered from v30
+    // → v32 on merge with master's v0.23 (dream_verdicts at v30) + v0.25
+    // (eval_capture_tables at v31). OAuth is independent of those chains so
+    // ordering doesn't matter beyond version ledger correctness. CREATE TABLE
+    // statements are idempotent so brains that previously applied this at v30
+    // see version 32 as new and run IF NOT EXISTS DDL cleanly.
     sql: `
       CREATE TABLE IF NOT EXISTS oauth_clients (
         client_id               TEXT PRIMARY KEY,
@@ -1118,8 +1248,6 @@ export const MIGRATIONS: Migration[] = [
         created_at             TIMESTAMPTZ NOT NULL DEFAULT now()
       );
       CREATE INDEX IF NOT EXISTS idx_mcp_log_time_agent ON mcp_request_log(created_at, token_name);
-      -- Enable RLS on the new OAuth tables (gated on BYPASSRLS, consistent with
-      -- the v24 rls_backfill / v29 cathedral RLS patterns).
       DO $$
       DECLARE
         has_bypass BOOLEAN;
@@ -1130,7 +1258,7 @@ export const MIGRATIONS: Migration[] = [
           ALTER TABLE oauth_tokens ENABLE ROW LEVEL SECURITY;
           ALTER TABLE oauth_codes ENABLE ROW LEVEL SECURITY;
         ELSE
-          RAISE WARNING 'v30: role % lacks BYPASSRLS — skipping RLS on OAuth tables. Re-run as postgres (or a BYPASSRLS role) to harden.', current_user;
+          RAISE WARNING 'v32: role % lacks BYPASSRLS — skipping RLS on OAuth tables. Re-run as postgres (or a BYPASSRLS role) to harden.', current_user;
         END IF;
       END $$;
     `,

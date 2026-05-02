@@ -1,5 +1,328 @@
 # TODOS
 
+## ci-local-mirror
+
+### CI-skip artifact + signature for stages 1+2 follow-up
+**Priority:** P0
+
+**What:** After a successful local CI run via `bun run ci:local`, write `.ci-cache/passed-<commit-sha>.json` containing `{commit, test_set_hash, bun_version, schema_hash, signature}`. Push to a `ci-cache` orphan branch (or GH Releases). CI's first step fetches the artifact for the current SHA and skips the test job if (a) signature matches Garry's GPG/SSH key, and (b) `test_set_hash` matches what CI would have run.
+
+**Why:** Stages 1+2 (shipped in this branch) give a strong local CI gate, but PR CI still re-runs every test on every push. Stage 3 closes the loop and trades ~10 min of CI wall-time for sub-second artifact verification on Garry's own pushes. External PRs are unaffected because the signature won't match — they hit the normal CI path.
+
+**Pros:**
+- ~10 min/PR saved on Garry's own pushes; the local gate becomes the source of truth.
+- External contributor PRs untouched (no security regression).
+- Forces a clear test-set-hash contract: any drift in what local-vs-CI run is caught at verification time.
+
+**Cons:**
+- Trust model needs careful design: signature scheme, key rotation, what happens when signature verification fails.
+- Cache invalidation is real — if env or service version drifts between local run and CI, a stale local pass could ship to master.
+- Adds a `ci-cache` branch / artifact storage surface to maintain.
+
+**Context:**
+- Discussed during the eng-review of the local CI mirror plan at `~/.claude/plans/lets-do-1-2-dockerfile-ci-zany-charm.md`.
+- Don't start until stages 1+2 have been used for ~2 weeks AND the `scripts/e2e-test-map.ts` has stabilized (so test_set_hash is a meaningful identity).
+- Initial trust-but-verify: run both local and CI in parallel for ~1 week before flipping the skip; alert on any disagreement.
+
+**Effort:** M (human ~2-3 days + ~1 week trust-but-verify period running both local + CI in parallel; CC ~1 day for the mechanics).
+
+**Depends on / blocked by:** Stages 1+2 (this PR) landing first.
+
+### test/e2e/multi-source.test.ts cascade test isn't isolated
+**Priority:** P1
+
+**What:** The "sources remove cascades to pages + chunks + timeline + links + files" test in `test/e2e/multi-source.test.ts:281` fails when the file runs after other E2E files in the sequential `bash scripts/run-e2e.sh` order, but passes 20/20 on a fresh Postgres volume. The failing assertion is `SELECT COUNT(*) FROM links WHERE from_page_id = aliceId` expecting 0, getting 1 — so a prior file's setup left a `links` row that references a page id the cascade test happens to reuse. The test's own `setupDB()` truncates but doesn't sweep all referencing rows back when ids collide.
+
+**Why:** Surfaced when `bun run ci:local` (this PR's local CI gate) ran the full sequential E2E. CI never catches it because `.github/workflows/e2e.yml:40` only runs `mechanical.test.ts + mcp.test.ts` on PRs and nightly Tier 1. So 27 of 29 E2E files including this one aren't actually exercised by CI today. The local gate is stronger and surfaces real cross-file isolation gaps.
+
+**Pros:**
+- Fixing isolation makes `bun run ci:local` (full E2E) reliably green.
+- Same fix likely to harden other E2E files that share id namespaces.
+- Lets us turn `bun run ci:local` into a real ship gate.
+
+**Cons:**
+- Could require a per-file "namespace your test ids" pattern, ~30 min per affected file across the suite.
+
+**Context:**
+- Repro: `bash scripts/run-e2e.sh test/e2e/multi-source.test.ts` against a stale DB after other E2E files have run → fails. Same against a fresh `docker compose down -v && up -d postgres` → passes 20/20.
+- The test inserts a hardcoded `cascadetest` source id and `aliceId` page id; collisions across runs are predictable.
+- Likely fix: use `mkdtemp`-style randomized source/page ids per test, OR have the test do a deeper reset (DELETE FROM all five tables in beforeEach) instead of relying on `setupDB`'s TRUNCATE behavior.
+
+**Effort:** S (CC ~30 min for the multi-source.test.ts fix; M if we audit all 29 E2E files for similar id-collision risk).
+
+**Depends on / blocked by:** Nothing.
+
+### scripts/run-e2e.sh:71 echo overflows on large-output failing tests
+**Priority:** P2
+
+**What:** When an E2E test fails AND prints lots of output (e.g., `multi-source.test.ts` floods postgres NOTICE objects), `scripts/run-e2e.sh:71` does `echo "$output"` against a multi-megabyte shell variable. The host pipe to docker-compose-run hits `EAGAIN` and fails with `echo: write error: Resource temporarily unavailable`. With `set -e`, the script aborts at that point, skipping the remaining E2E files and the final SUMMARY block.
+
+**Why:** When the local CI gate finds a real failure (per the multi-source.test.ts entry above), the user wants to see it AND see how the rest of the suite did. Currently the failure shadows the rest.
+
+**Pros:**
+- See all E2E failures from a single run instead of needing to bisect.
+- Quick win, ~5 lines.
+
+**Cons:**
+- None worth listing.
+
+**Context:**
+- Reproduced live during plan verification on 2026-04-29. Previous `multi-source.test.ts` failure killed the script before postgres-bootstrap, postgres-jsonb, etc. could run.
+- Likely fix: replace `echo "$output"` with `printf '%s\n' "$output"`, or write `$output` to a tmpfile and `cat` it (handles large blobs better than echo over pipes), or pipe through `stdbuf -o0`.
+- Don't suppress the postgres NOTICE flood at the test layer — that's separate; here we just want the script to not die when bun's stderr is verbose.
+
+**Effort:** S (human or CC: ~10 min).
+
+**Depends on / blocked by:** Nothing.
+
+## claw-test E2E (v0.22.16 follow-ups)
+
+### Hermes runner — `src/core/claw-test/runners/hermes.ts`
+**Priority:** P2
+
+**What:** Add a Hermes implementation of the `AgentRunner` interface. v1 ships only OpenClaw; v1.1 lands hermes once we have real friction reports from openclaw to validate the contract against.
+
+**Why:** Cross-agent diff (`gbrain friction diff --base openclaw --compare hermes`) is the highest-leverage next signal. Friction unique to one agent vs common-to-both separates "agent contract bug" from "gbrain bug" automatically.
+
+**Effort:** S (CC ~30m). Depends on: v1 openclaw runner producing real friction reports first.
+
+---
+
+### Friction analytics suite — `diff` / `trend` / `migration-stub`
+**Priority:** P2
+
+**What:** Three new `gbrain friction` subcommands deferred from v1:
+- `gbrain friction diff --base <run-or-agent> --compare <run-or-agent>` (cross-agent comparison; ~80 LOC)
+- `gbrain friction trend [--since <version-or-date>] [--phase <name>]` (time-series across runs; ~60 LOC)
+- `gbrain friction migration-stub [--threshold N]` (clusters friction by phase + tokens, emits `skills/migrations/v[N+1].md` stub; ~150 LOC)
+
+**Why:** Turns point-in-time reports into a slope. Pairs with the v1.1 public scoreboard.
+
+**Effort:** M (CC ~2h total).
+
+---
+
+### Scenario expansion — `supabase-migration` and `supervisor-restart`
+**Priority:** P2
+
+**What:** Two more scenarios under `test/fixtures/claw-test-scenarios/`:
+- `supabase-migration` — `gbrain init --pglite` then `gbrain migrate --to supabase`; verifies the cross-engine migration path
+- `supervisor-restart` — kill worker mid-job; verify supervisor recovers without data loss
+
+**Why:** These are the other highest-historical-pain regression points (per CLAUDE.md fix-wave history). v1 ships only `fresh-install` + `upgrade-from-v0.18` because Codex flagged that mixing them dilutes the fresh-install signal; v1.1 lands them as separate scenarios.
+
+**Effort:** M (CC ~1h each).
+
+---
+
+### Real v0.18 SQL dump for upgrade scenario
+**Priority:** P2
+
+**What:** The `upgrade-from-v0.18` scenario ships scaffolded — `seed/dump.sql` is missing. The harness gracefully no-ops the seed phase when absent, so the scenario currently behaves like fresh-install. v1.1: generate a real v0.18-shape PGLite dump per the procedure documented in `test/fixtures/claw-test-scenarios/upgrade-from-v0.18/seed/README.md`.
+
+**Why:** Without a real seed, the scenario doesn't actually exercise the migration chain forward-walk. That's the whole point of the upgrade scenario — proves issue #239/#243/#266/#357 class regressions stay fixed.
+
+**Effort:** S (CC ~30m once a v0.18 checkout is handy). Depends on: ability to run a v0.18 gbrain build.
+
+---
+
+### Public scoreboard — `gbrain-evals.io/friction`
+**Priority:** P3
+
+**What:** Sibling-repo PR in `garrytan/gbrain-evals` that renders friction JSONL into a public dashboard. Friction count per version per agent, line charts over time. v1's JSONL already includes `gbrain_version` + `agent` tags so the scoreboard is a thin layer on top.
+
+**Why:** Marketing surface. Proves install quality is improving release-over-release. The friction loop becomes visible to the world, not just maintainers.
+
+**Effort:** M. Depends on: a working live mode and ≥10 real friction reports.
+
+---
+
+### PTY-mode transcript capture
+**Priority:** P3
+
+**What:** `transcript-capture.ts` currently uses plain `child_process.spawn` pipes. Some agents only emit ANSI colors / progress UI on a TTY. v1.1 adds a PTY mode (likely via `node-pty`) so live-mode transcripts capture the full agent UX.
+
+**Why:** Faithful transcripts make the friction → reasoning link more useful. v1 accepts that some agent UI is lost.
+
+**Effort:** S (CC ~30m). Mostly a ~30 LOC swap inside `spawnWithCapture`.
+
+---
+
+### Read-side host-isolation (`$GBRAIN_HOST_HOME`)
+**Priority:** P3
+
+**What:** v0.22.16 confined every `~/.gbrain` write site to honor `$GBRAIN_HOME`. But `src/commands/init.ts:299-313` still reads real `~/.claude` / `~/.openclaw` / `~/.codex` / `~/.factory` / `~/.kiro` for module fingerprinting (host detection). Even with write-isolation, a claw-test running on a developer's box discovers their real installed mods. v1.1: add a separate `$GBRAIN_HOST_HOME` override for the read-side detection so the claw-test can run truly hermetic.
+
+**Why:** v1's hermeticity contract is "writes are isolated, reads are not." v1.1 closes the read-side gap.
+
+**Effort:** S (CC ~30m).
+
+---
+
+### Routing-callout sweep — annotate skills the claw-test exercises
+**Priority:** P3
+
+**What:** `skills/_friction-protocol.md` is a cross-cutting convention. v1.1: sweep the 4–6 skills the claw-test actually exercises (setup, brain-ops, query, ingest, smoke-test, the migrations the test covers) and add a `> **Convention:** see [skills/_friction-protocol.md](_friction-protocol.md).` callout via the existing `src/core/dry-fix.ts` shape so DRY auto-fix doesn't fight it.
+
+**Why:** Right now agents only call `gbrain friction log` if they find the protocol skill on their own. The callouts route them there proactively from any harness-exercised skill.
+
+**Effort:** S (CC ~15m).
+
+---
+
+## minions / worker (v0.22.14 follow-ups)
+
+### v0.22.15 — Embed cooperative-abort (HIGHEST PRIORITY — daily pain)
+**Priority:** P0
+
+**What:** Plumb `signal: AbortSignal` through `runPhaseEmbed` →
+`src/commands/embed.ts` → `embedBatch` in `src/core/embedding.ts`. Check
+`signal?.aborted` between OpenAI batch calls (every ~100 texts, ~2s
+real-time) and between slugs in the per-slug loop.
+
+**Why:** Embed phase ignores `signal.aborted` between batches today. Job
+wall-clock timeout fires → handler keeps running → cycle's finally block
+unreachable → `gbrain_cycle_locks` row stays held indefinitely. Every
+subsequent autopilot cron cycle sees `cycle_already_running` → skips. Lock
+TTL is 30 min; new cycles give up before that. Doctor reports UNHEALTHY.
+
+**The chain in production:** ~5min cron submits cycle → 22K stale pages →
+embed phase takes 10–15 min → 600s timeout fires → job dead-lettered → embed
+keeps running → lock held → all subsequent cycles skip. Garry hits this
+DAILY on his production brain.
+
+**Pros:** Closes the daily wedge. Makes timeouts actually effective. Lets
+operators bump worker timeouts confidently knowing abort actually stops
+work.
+
+**Cons:** Touching the embed hot path; small risk of botching the abort
+checks. Mitigation: between-batch granularity (~2s), not per-text (too fine)
+or per-slug (too coarse for 500+ chunk slugs).
+
+**Context:** PR #503 (v0.22.14) catches the SYMPTOM (worker stalled, queue
+piling up) via self-health-monitoring. This PR catches the CAUSE for one
+specific failure class. Both fixes are needed; they're complementary, not
+duplicative.
+
+**Files to touch:**
+- `src/core/cycle.ts:579` — `runPhaseEmbed(engine, dryRun)` → add
+  `signal?: AbortSignal` arg
+- `src/core/cycle.ts:803` — pass `opts.signal` through
+- `src/commands/embed.ts:~363` — accept signal, check between slugs
+- `src/core/embedding.ts:51-56` — `embedBatch(texts, onProgress?, signal?)`,
+  check between for-loop iterations of `BATCH_SIZE` slices
+
+**Tests required:**
+1. embedBatch checks signal between OpenAI calls; aborts within one batch (~2s)
+2. Per-slug loop in `embed.ts` checks signal between slugs
+3. End-to-end: cycle handler with embed phase + signal aborted mid-flight →
+   finally runs → `gbrain_cycle_locks` row deleted
+4. Regression: 1K+ chunks scenario — embed does NOT block lock release when
+   timeout fires
+
+**Effort:** M (human: ~3 hr / CC: ~30 min).
+
+**Depends on / blocked by:** Nothing. v0.22.14 ships first.
+
+### v0.23+ — Bare-worker engine reconnect parity with supervisor
+**Priority:** P2
+
+**What:** Extract the supervisor's reconnect-then-fail pattern into
+`MinionWorker` so bare workers can retry transient DB blips before exiting.
+Today the supervisor calls `engine.reconnect()` after 3 consecutive DB health
+failures (#406); the bare worker just emits `'unhealthy'` and the CLI calls
+`process.exit(1)`.
+
+**Why:** Bare-worker behavior is more disruptive than supervised behavior on
+transient PgBouncer blips. A bare worker restarts the entire process; a
+supervised worker just reconnects the pool. Operationally the supervisor
+approach is gentler (no in-flight job loss, no PM restart latency).
+
+**Pros:** Unifies bare and supervised behavior. Reduces process churn on
+transient network blips.
+
+**Cons:** More code in MinionWorker; risk of reconnect masking a real
+problem. Mitigation: cap retry attempts, fall through to `'unhealthy'`
+emission after the cap.
+
+**Context:** Filed during v0.22.14 plan-eng-review. The asymmetry is
+documented in v0.22.14 CHANGELOG as deliberate; this TODO captures the
+"unify someday" intent.
+
+**Effort:** S (human: ~2 hr / CC: ~20 min).
+
+**Depends on / blocked by:** Nothing.
+
+### v0.23+ — `minion_workers` heartbeat table for queue_health doctor (B7)
+**Priority:** P3
+
+**What:** Add a `minion_workers` table (`worker_id` PK, `hostname`,
+`last_heartbeat`, `queue`, `concurrency`, `started_at`) so the existing
+`queue_health` doctor check (Postgres path) can detect dead workers via
+heartbeat staleness instead of relying on the indirect `lock_until` proxy.
+
+**Why:** v0.19.1 added `queue_health` checks for stalled-active jobs and
+waiting-depth threshold. The worker-heartbeat subcheck was deferred (B7)
+because the `lock_until`-on-active-jobs proxy can't distinguish "worker
+exited cleanly" from "worker idle" — a check that cries wolf erodes trust
+in every doctor check. With a real heartbeat row, doctor can say "no worker
+seen in N intervals" with confidence.
+
+**Pros:** Doctor's `queue_health` becomes ground-truth. Detects "worker
+container died but cron didn't restart it" scenario.
+
+**Cons:** New table, schema migration, every health-tick UPSERTs. Costs
+a write per worker per minute (default).
+
+**Context:** Filed during v0.22.14 plan-eng-review. PR #503's self-health
+monitoring is the worker-side liveness; this would be the queue-side
+ground-truth.
+
+**Effort:** M (human: ~1 day / CC: ~1 hr).
+
+**Depends on / blocked by:** Schema migration system; nothing else.
+
+## sync (v0.22.13 follow-up — PR #490 review)
+
+### D-PR490-1 — Plumb resolved `database_url` through `SyncOpts`
+**Priority:** P3
+
+**What:** Add `database_url?: string` (or a richer `resolvedConnection` shape) to
+`SyncOpts` and have the caller (`runSync`, the cycle handler, the jobs handler)
+populate it from the active engine instead of having `performSync` /
+`performFullSync` / `import.ts` each call `loadConfig()` separately. Today every
+sync run hits the config file three times.
+
+**Why:** v0.18 multi-source brains can in principle run different sources against
+different `database_url` endpoints (or different per-source overrides via
+`sources.config_jsonb`). Right now `loadConfig()` returns the global config, and
+that always matches the engine in practice — but the convention papers over a
+real divergence the moment someone wants per-source connection settings. Folding
+the resolution into `SyncOpts` makes the worker-engine creation in `sync.ts` and
+`import.ts` deterministic from `SyncOpts` alone.
+
+**Pros:**
+- Removes 3 redundant `loadConfig()` calls per sync.
+- Makes `performSync` / `performFullSync` side-effect-free with respect to the
+  on-disk config file.
+- Sets up for per-source `database_url` overrides without further refactor.
+- Makes the v0.22.13 belt-and-suspenders fallback (PR #490 Q3) cleaner — no
+  more `!config?.database_url` short-circuit inside the parallel branch.
+
+**Cons:**
+- API-shape change to `SyncOpts` (mild; not externally exported).
+- Touching three callers (`runSync`, jobs handler, `cycle.ts` `runPhaseSync`).
+- Only worth doing when paired with a per-source override story; otherwise
+  it's just plumbing.
+
+**Context:** Surfaced during the PR #490 plan-eng-review (parallel sync).
+Deferred because it isn't on the v0.22.13 critical path. The same pattern would
+benefit the cycle handler and the autopilot daemon. See the plan-eng-review
+decisions log: A4 = "Defer; file as TODO."
+
+**Depends on / blocked by:** Nothing structural. Best paired with the v0.18
+per-source `config_jsonb` work if/when that lands.
+
 ## sync error-code classification (PR #501 follow-ups)
 
 ### Plumb structured `ParseValidationCode` through `ImportResult`
@@ -220,6 +543,18 @@ keeping both skills' triggers intact for chaining.
 
 **Depends on / blocked by:** Nothing — UNION-on-read path keeps unresolved edges surfaced even without this.
 
+## P3 — Dev experience: test suite parallelism on fast multi-core machines
+
+**Context:** `bun test` on M-series Macs spawns ~1 worker per core. `test/dream.test.ts` (5 describe blocks, 11 tests) and `test/orphans.test.ts` create a fresh PGLite engine in `beforeEach` that runs ~20 schema migrations per test. Under parallel load, WASM-instance contention causes ~18 `beforeEach` timeouts at 5–9s.
+
+**Evidence:** CI (ubuntu-latest, fewer cores) is green on every PR. Running the suspect files in isolation (`bun test test/dream.test.ts test/orphans.test.ts`) is also green. Reproduces only on fast multi-core local machines running the full 136-file parallel suite.
+
+**Fix:** move engine creation from `beforeEach` to `beforeAll` per describe block; add a data-reset helper (delete-all-rows-in-relevant-tables) between tests. ~80 LOC change across two test files.
+
+**Priority:** P3 because production CI is unaffected. Hits local dev iteration speed on fast Macs.
+
+**Found:** 2026-04-24 during v0.19.0 production-readiness review.
+
 ## Completed
 
 ### ~~Checks 5 + 6 for check-resolvable~~
@@ -352,6 +687,21 @@ iteration's residuals.
 
 ## P0
 
+### PGLite test-runner concurrency flake (~27 false failures in full `bun test`)
+**What:** Fix the concurrent-PGLite-init flake that surfaces ~27 `error: PGLite not connected. Call connect() first.` failures when `bun test` runs all 174 unit-test files together. Each failing file passes in isolation; failures only appear under full-suite parallelism.
+
+**Why:** The failures are masking real signal. /ship and any solo dev running `bun test` has to manually triage 27 results every time. Today they're all in `test/cathedral-ii-pglite.test.ts`, `test/cathedral-ii-brainbench.test.ts` (Layer 5/6/7/8 + parent_scope_coverage + call_graph_recall), `test/sync.test.ts` (4 dry-run cases), `test/reindex-code.test.ts` (Layer 13 E2). All exist on master and date back to v0.12.3-v0.21.0 — pre-existing, not caused by any one branch.
+
+**Context:** Confirmed pre-existing on master via `git diff origin/master...HEAD --stat -- <failing files>` returning empty. Tests pass cleanly in 1-3-file batches. Wall clock for the full suite is 596s. Likely root causes: (a) PGLite has a singleton or shared OPFS-like state that races under parallel `PGlite.create()` calls, (b) `test/cathedral-ii-pglite.test.ts` "fresh-install schema" tests assume exclusive PGLite access, (c) bun test concurrency exceeds what PGLite's WASM init can handle.
+
+**Pros:** Green suite signal. Faster shipping. Stops eroding trust in `bun test`.
+
+**Cons:** Likely needs PGLite engine-per-test isolation (each test gets its own dedicated engine instance via tmpdir) or a `bun test --concurrency=N` cap. Both touch test infra used by 50+ files.
+
+**Effort:** M (human: 1 day to root-cause + implement / CC: ~2-3 hours via /investigate).
+
+**Discovered:** v0.25.0 ship, 2026-04-25.
+
 ### Fix `bun build --compile` WASM embedding for PGLite
 **What:** Submit PR to oven-sh/bun fixing WASM file embedding in `bun build --compile` (issue oven-sh/bun#15032).
 
@@ -377,6 +727,26 @@ iteration's residuals.
 **Context:** From CEO review + Codex outside voice (2026-04-13). Prompt-layer access control works in practice (same model as Garry's OpenClaw) but is not sufficient for remote MCP where direct tool calls bypass the agent's prompt.
 
 **Depends on:** v0.10.0 GStackBrain skill layer (shipped).
+
+## P1 (new from v0.25.0 — eval-capture adversarial review)
+
+### v0.25.0 eval-capture follow-ups (6 surgical hardenings)
+**Priority:** P1
+
+**What:** Six targeted hardenings on the v0.25.0 eval-capture surface, all surfaced by the /ship adversarial review and triaged out of the v0.25.0 PR to keep scope tight:
+
+1. `gbrain eval prune --dry-run`: replace the `listEvalCandidates(limit:100k) + filter` count with a real `engine.countEvalCandidatesBefore(date)` method. Today the warning at `eval-prune.ts:107-109` honestly tells the user the count may be undercounted, but a brain with > 100k rows + old data could still confuse a careful operator. New `BrainEngine` method on both engines, ~30 LOC, lifts the floor count to a true count.
+2. PII scrubber CC false-positive rate: 16-digit Luhn-valid order IDs / invoice numbers get redacted as `[REDACTED]`. Either require a contextual prefix (`card`, `cc`, `credit`) within N chars, or document the tradeoff explicitly in `docs/eval-capture.md`. The two approaches differ in coverage so list them as alternatives.
+3. `eval_capture_failures.reason` enum: `'scrubber_exception'` is dead telemetry — no realistic path emits it (the scrubber is regex-only and never throws). Either remove the value from the schema CHECK + enum, OR wrap `scrubPii` in a try-catch inside `buildEvalCandidateInput` so the value is actually reachable.
+4. `id DESC` tiebreaker docs: CLAUDE.md says "stable id-desc tiebreaker so `--since` windows never dupe/miss rows". This is true within a single call but doesn't prevent dupe/miss across overlapping windows when LIMIT < total. Either add a real `id`-cursor (`WHERE id < $cursor`) for export, or scope the doc claim to "within a single export call".
+5. Public-exports canaries: 6 of 17 subpaths (`gbrain` root, `/minions`, `/engine-factory`, `/transcription`, `/backoff`, `/extract`) have `canary: []` — the test only checks the import resolves, so a barrel module accidentally losing its named exports would still pass. Pin one stable canary symbol per subpath.
+6. `EXPECTED_COUNT` duplication: `scripts/check-exports-count.sh` and `test/public-exports.test.ts` both hardcode `17`. Drift risk. Make one read the other (or both compute from `package.json`).
+
+**Why:** All 6 are real (some informational, some footgun-class) but each is small and surgical. Bundling into one v0.25.1 follow-up PR keeps the v0.25.0 ship clean and lets the fixes land with their own dedicated tests + CHANGELOG entry.
+
+**Effort:** S total (human: ~half day / CC: ~1.5 hours).
+
+**Discovered:** v0.25.0 ship adversarial review, 2026-04-25.
 
 ## P1 (new from v0.7.0)
 
