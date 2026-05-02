@@ -117,6 +117,10 @@ ALLOW_LIST=(
   # as CLAUDE.md and this script itself: meta-documentation needs to
   # name the patterns it forbids.
   'CHANGELOG.md'
+  # skills/migrations/v0.25.1.md is the agent-readable upgrade
+  # walkthrough; it explains the privacy-guard extension to the
+  # operating agent and references the banned literals while doing so.
+  'skills/migrations/v0.25.1.md'
 )
 
 is_allowed() {
