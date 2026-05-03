@@ -87,12 +87,23 @@ export async function assessDestructiveImpact(
   );
   const embeddingCount = embedRows[0]?.n ?? 0;
 
-  // Count files in storage (if any)
-  const fileRows = await engine.executeRaw<{ n: number }>(
-    `SELECT COUNT(*)::int AS n FROM files WHERE source_id = $1`,
-    [sourceId],
+  // Count files in storage (if any). PGLite has no `files` table — that
+  // surface is Postgres-only (CLAUDE.md: "No files table" for PGLite). Probe
+  // the table existence via information_schema so this works on both engines.
+  let fileCount = 0;
+  const filesTableRows = await engine.executeRaw<{ exists: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_name = 'files'
+     ) AS exists`,
   );
-  const fileCount = fileRows[0]?.n ?? 0;
+  if (filesTableRows[0]?.exists) {
+    const fileRows = await engine.executeRaw<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM files WHERE source_id = $1`,
+      [sourceId],
+    );
+    fileCount = fileRows[0]?.n ?? 0;
+  }
 
   const parts: string[] = [];
   if (pageCount > 0) parts.push(`${pageCount.toLocaleString()} pages`);
@@ -155,20 +166,37 @@ export function checkDestructiveConfirmation(
 // ── Soft Delete ─────────────────────────────────────────────
 
 /**
- * Soft-delete a source: mark it as archived with a TTL. Pages remain in DB
- * but the source is hidden from search/list by default. After TTL expires,
- * a background job or manual `gbrain sources purge` permanently removes it.
+ * Soft-delete a source: mark `archived = true` with a 72h TTL. Pages remain
+ * in DB; the source is hidden from search via `buildVisibilityClause` and
+ * federation is disabled via the existing `config.federated` JSONB key. After
+ * TTL expires, the autopilot purge phase or manual `gbrain sources purge`
+ * permanently removes the row (cascade delete to pages + chunks).
+ *
+ * v0.26.5: archive state moved from `config` JSONB keys to real columns
+ * (`archived`, `archived_at`, `archive_expires_at`). Migration v33 backfills
+ * pre-v0.26.5 rows. Faster filter, no reserved-key footgun. The `federated`
+ * key stays in JSONB because federation has its own toggle path.
  */
 export async function softDeleteSource(
   engine: BrainEngine,
   sourceId: string,
 ): Promise<SoftDeletedSource | null> {
-  const sources = await engine.executeRaw<{ id: string; name: string }>(
-    `SELECT id, name FROM sources WHERE id = $1`,
+  // Atomic: only flip rows that are currently active. Returns the metadata
+  // we need without a follow-up SELECT. RETURNING projects the columns the
+  // caller cares about; pageCount is a separate count.
+  const expiresClause = `now() + (${SOFT_DELETE_TTL_HOURS} || ' hours')::interval`;
+  const rows = await engine.executeRaw<{ id: string; name: string; archived_at: string; archive_expires_at: string }>(
+    `UPDATE sources
+     SET archived = true,
+         archived_at = now(),
+         archive_expires_at = ${expiresClause},
+         config = COALESCE(config, '{}'::jsonb) || '{"federated": false}'::jsonb
+     WHERE id = $1 AND archived = false
+     RETURNING id, name, archived_at, archive_expires_at`,
     [sourceId],
   );
-  if (sources.length === 0) return null;
-  const src = sources[0];
+  if (rows.length === 0) return null;
+  const row = rows[0];
 
   const pageRows = await engine.executeRaw<{ n: number }>(
     `SELECT COUNT(*)::int AS n FROM pages WHERE source_id = $1`,
@@ -176,120 +204,95 @@ export async function softDeleteSource(
   );
   const pageCount = pageRows[0]?.n ?? 0;
 
-  // Set archived metadata in config
-  const now = new Date();
-  const expiresAt = new Date(now.getTime() + SOFT_DELETE_TTL_HOURS * 60 * 60 * 1000);
-
-  await engine.executeRaw(
-    `UPDATE sources
-     SET config = COALESCE(config, '{}'::jsonb) || $1::jsonb
-     WHERE id = $2`,
-    [
-      JSON.stringify({
-        archived: true,
-        archived_at: now.toISOString(),
-        archive_expires_at: expiresAt.toISOString(),
-        federated: false, // immediately remove from search
-      }),
-      sourceId,
-    ],
-  );
-
   return {
     id: sourceId,
-    name: src.name,
-    deletedAt: now,
-    expiresAt,
+    name: row.name,
+    deletedAt: new Date(row.archived_at),
+    expiresAt: new Date(row.archive_expires_at),
     pageCount,
   };
 }
 
 /**
- * Restore a soft-deleted source (un-archive).
+ * Restore a soft-deleted source (un-archive). Returns true iff a row was
+ * restored. Idempotent-as-false on "already active" or "not found".
+ *
+ * v0.26.5: clears the column-based archive state and (by default) flips
+ * `config.federated = true` so the source re-enters federated search. The
+ * `--no-federate` operator opt-out keeps federation disabled.
  */
 export async function restoreSource(
   engine: BrainEngine,
   sourceId: string,
   refederate: boolean = true,
 ): Promise<boolean> {
-  const sources = await engine.executeRaw<{ id: string; config: unknown }>(
-    `SELECT id, config FROM sources WHERE id = $1`,
-    [sourceId],
+  const federatedPatch = refederate ? '{"federated": true}' : '{"federated": false}';
+  const rows = await engine.executeRaw<{ id: string }>(
+    `UPDATE sources
+     SET archived = false,
+         archived_at = NULL,
+         archive_expires_at = NULL,
+         config = COALESCE(config, '{}'::jsonb) || $1::jsonb
+     WHERE id = $2 AND archived = true
+     RETURNING id`,
+    [federatedPatch, sourceId],
   );
-  if (sources.length === 0) return false;
-
-  const config = typeof sources[0].config === 'string'
-    ? JSON.parse(sources[0].config)
-    : sources[0].config ?? {};
-
-  if (!config.archived) {
-    // Not archived — nothing to restore
-    return false;
-  }
-
-  // Remove archive metadata, optionally re-federate
-  delete config.archived;
-  delete config.archived_at;
-  delete config.archive_expires_at;
-  if (refederate) config.federated = true;
-
-  await engine.executeRaw(
-    `UPDATE sources SET config = $1::jsonb WHERE id = $2`,
-    [JSON.stringify(config), sourceId],
-  );
-
-  return true;
+  return rows.length > 0;
 }
 
 /**
  * List all soft-deleted (archived) sources.
+ *
+ * v0.26.5: filters via the real `archived` column instead of JSONB
+ * containment. Faster, indexable on demand, no JSONB reserved-key collision
+ * with future config schemas.
  */
 export async function listArchivedSources(
   engine: BrainEngine,
 ): Promise<SoftDeletedSource[]> {
-  const rows = await engine.executeRaw<{ id: string; name: string; config: unknown }>(
-    `SELECT id, name, config FROM sources
-     WHERE config::jsonb @> '{"archived": true}'::jsonb`,
+  const rows = await engine.executeRaw<{
+    id: string;
+    name: string;
+    archived_at: string;
+    archive_expires_at: string;
+    page_count: number;
+  }>(
+    `SELECT
+        s.id, s.name, s.archived_at, s.archive_expires_at,
+        COALESCE((SELECT COUNT(*)::int FROM pages p WHERE p.source_id = s.id), 0) AS page_count
+     FROM sources s
+     WHERE s.archived = true
+     ORDER BY s.archived_at DESC`,
   );
 
-  const results: SoftDeletedSource[] = [];
-  for (const row of rows) {
-    const config = typeof row.config === 'string' ? JSON.parse(row.config) : row.config ?? {};
-    const pageRows = await engine.executeRaw<{ n: number }>(
-      `SELECT COUNT(*)::int AS n FROM pages WHERE source_id = $1`,
-      [row.id],
-    );
-    results.push({
-      id: row.id,
-      name: row.name,
-      deletedAt: new Date(config.archived_at),
-      expiresAt: new Date(config.archive_expires_at),
-      pageCount: pageRows[0]?.n ?? 0,
-    });
-  }
-
-  return results;
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    deletedAt: new Date(row.archived_at),
+    expiresAt: new Date(row.archive_expires_at),
+    pageCount: row.page_count,
+  }));
 }
 
 /**
- * Permanently purge sources whose soft-delete TTL has expired.
- * Returns the ids of purged sources.
+ * Permanently purge sources whose 72h TTL has expired. Cascades to pages
+ * (and content_chunks via existing FKs). Returns the ids of purged sources.
+ *
+ * v0.26.5: moved from JSONB-driven iteration to a single set-based DELETE
+ * with `archived = true AND archive_expires_at <= now()`. Server-side
+ * filter; one round-trip; cascade-friendly.
  */
 export async function purgeExpiredSources(
   engine: BrainEngine,
 ): Promise<string[]> {
-  const archived = await listArchivedSources(engine);
-  const now = new Date();
-  const purged: string[] = [];
-
-  for (const src of archived) {
-    if (src.expiresAt <= now) {
-      await engine.executeRaw(`DELETE FROM sources WHERE id = $1`, [src.id]);
-      purged.push(src.id);
-    }
-  }
-
-  return purged;
+  const rows = await engine.executeRaw<{ id: string }>(
+    `DELETE FROM sources
+     WHERE archived = true
+       AND archive_expires_at IS NOT NULL
+       AND archive_expires_at <= now()
+     RETURNING id`,
+  );
+  return rows.map((r) => r.id);
 }
 
 // ── Display Helpers ─────────────────────────────────────────
