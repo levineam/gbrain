@@ -2,22 +2,22 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.26.4] - 2026-05-03
+## [0.26.6] - 2026-05-03
 
 ## **PGLite ↔ Postgres schema parity is now a CI gate. Adding a column to one side without the other fails the PR before merge.**
 ## **`bun run ci:local` runs both engines through `initSchema()` and diffs `information_schema` ... no more silent drift.**
 
-The v0.26.1 hotfix wrapped each new-column query in try/catch because production Postgres got `ALTER TABLE`s the embedded PGLite schema never received. That works but rots: every new column becomes a try/catch decision and the next drift slips the same way. v0.26.4 makes drift a build error.
+The v0.26.1 hotfix wrapped each new-column query in try/catch because production Postgres got `ALTER TABLE`s the embedded PGLite schema never received. That works but rots: every new column becomes a try/catch decision and the next drift slips the same way. v0.26.6 makes drift a build error.
 
 `test/e2e/schema-drift.test.ts` spins up a fresh PGLite and a fresh Postgres database, runs each engine's canonical `initSchema()` (bootstrap + schema replay + migrations), then snapshots `information_schema.columns` from both and diffs the four-tuple `(data_type, udt_name, is_nullable, column_default)` per column. Tables in `src/schema.sql` but absent from PGLite must be on a 2-table allowlist (`files`, `file_migration_ledger`) — narrow by design so the next "Postgres-only" addition has to be defended. Sentinels for `oauth_clients`, `mcp_request_log`, `access_tokens`, `eval_candidates` give tighter blame messages when one specific table drifts.
 
-Codex review caught a real drift the gate flagged on its first run: `access_tokens.id` was `UUID` on Postgres and `TEXT` on PGLite. v0.26.4 reconciles to `UUID DEFAULT gen_random_uuid()` on both sides. Existing PGLite brains keep TEXT (the v4 migration ran earlier on those); fresh installs converge on UUID.
+Codex review caught a real drift the gate flagged on its first run: `access_tokens.id` was `UUID` on Postgres and `TEXT` on PGLite. v0.26.6 reconciles to `UUID DEFAULT gen_random_uuid()` on both sides. Existing PGLite brains keep TEXT (the v4 migration ran earlier on those); fresh installs converge on UUID.
 
 ### The numbers that matter
 
 17 unit cases for the pure diff function (run in <100ms, no database needed) plus 6 E2E cases (PGLite + Postgres, ~1.5s with the test container). The D3 negative test feeds the diff a synthetic `oauth_clients` schema missing `token_ttl` + `deleted_at` and asserts the failure names both columns by hand — this is what would have caught v0.26.1 if the gate had existed at the time.
 
-| Metric | BEFORE v0.26.4 | AFTER v0.26.4 | Δ |
+| Metric | BEFORE v0.26.6 | AFTER v0.26.6 | Δ |
 |---|---|---|---|
 | Cross-engine drift detection | manual review | E2E gate on every PR | structural |
 | `access_tokens.id` type parity | UUID vs TEXT (drift) | UUID on both | reconciled |
@@ -29,7 +29,7 @@ Codex review caught a real drift the gate flagged on its first run: `access_toke
 
 You add a column to `src/schema.sql` and forget the migration's `sqlFor.pglite` branch. The drift gate fails with `oauth_clients.your_new_col … add to src/core/pglite-schema.ts` and the CI job blocks the merge. Same flow when the type drifts (`udt_name` mismatch), nullability flips, or default changes. Run the gate locally before push: `bun run ci:local` or `DATABASE_URL=… bun test test/e2e/schema-drift.test.ts`.
 
-## To take advantage of v0.26.4
+## To take advantage of v0.26.6
 
 No user action required. The gate runs at PR time on every push and locally via `bun run ci:local`.
 
@@ -52,11 +52,11 @@ If you maintain a fork or downstream consumer:
 - `scripts/e2e-test-map.ts` ... new entries for `src/schema.sql`, `src/core/pglite-schema.ts`, `src/core/migrate.ts` so the diff-aware E2E selector triggers `test/e2e/schema-drift.test.ts` on schema-relevant changes.
 - `test/e2e/schema-drift.test.ts` is picked up automatically by `scripts/run-e2e.sh`'s default glob and by `bun run ci:local`'s pgvector container.
 
-### What's NOT in this release (filed for v0.26.5)
+### What's NOT in this release (filed for v0.26.7)
 
 - **Manual `ALTER TABLE` on production Postgres** that never made it into source files (the actual v0.26.1 trigger). Catching this requires comparing prod's `information_schema` against `src/schema.sql` ... a `gbrain doctor --schema-audit` mechanism, separate from the CI parity gate.
-- **Index parity.** Issue #588 lists this as a goal; v0.26.4 covers columns. The `diffSnapshots` shape is extensible to indexes via a sibling `information_schema.statistics` query.
-- **Versioning hardening.** HEAD's VERSION + package.json said `0.26.0` even though the most recent commit message read `v0.26.1 fix(oauth)`. v0.26.4 ships the next user-visible release; a `scripts/check-version-sync.sh` pre-push guard is on deck for v0.26.5.
+- **Index parity.** Issue #588 lists this as a goal; v0.26.6 covers columns. The `diffSnapshots` shape is extensible to indexes via a sibling `information_schema.statistics` query.
+- **Versioning hardening.** HEAD's VERSION + package.json said `0.26.0` even though the most recent commit message read `v0.26.1 fix(oauth)`. v0.26.6 ships the next user-visible release; a `scripts/check-version-sync.sh` pre-push guard is on deck for v0.26.7.
 
 Closes #588.
 
