@@ -1471,7 +1471,11 @@ export class PostgresEngine implements BrainEngine {
     const sql = this.sql;
     const [stats] = await sql`
       SELECT
-        (SELECT count(*) FROM pages) as page_count,
+        -- v0.26.5: exclude soft-deleted from page_count. Same posture as the
+        -- search filter and getPage default — soft-deleted is hidden everywhere
+        -- the user looks. Chunks/links stay raw because they still occupy
+        -- storage until the autopilot purge phase runs.
+        (SELECT count(*) FROM pages WHERE deleted_at IS NULL) as page_count,
         (SELECT count(*) FROM content_chunks) as chunk_count,
         (SELECT count(*) FROM content_chunks WHERE embedded_at IS NOT NULL) as embedded_count,
         (SELECT count(*) FROM links) as link_count,

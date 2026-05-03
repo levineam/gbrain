@@ -1419,7 +1419,8 @@ export class PGLiteEngine implements BrainEngine {
   async getStats(): Promise<BrainStats> {
     const { rows: [stats] } = await this.db.query(`
       SELECT
-        (SELECT count(*) FROM pages) as page_count,
+        -- v0.26.5: exclude soft-deleted from page_count (mirrors postgres-engine).
+        (SELECT count(*) FROM pages WHERE deleted_at IS NULL) as page_count,
         (SELECT count(*) FROM content_chunks) as chunk_count,
         (SELECT count(*) FROM content_chunks WHERE embedded_at IS NOT NULL) as embedded_count,
         (SELECT count(*) FROM links) as link_count,
