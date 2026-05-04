@@ -139,6 +139,31 @@ done
 # Heartbeat: every 10s, print per-shard progress to stderr by tailing logs
 # and counting Bun's `(pass)` / `(fail)` / `(skip)` markers. Read-only.
 # ──────────────────────────────────────────────────────────────────────────
+# grep_count: returns 0 (single integer) if file is missing or zero matches,
+# otherwise the match count. Avoids the `grep -c | echo 0` double-output bug
+# where 0 matches produces a 2-line "0\n0" string that breaks arithmetic.
+grep_count() {
+  local pattern="$1"; local file="$2"
+  if [ ! -f "$file" ]; then echo 0; return; fi
+  local n
+  n=$(grep -cE "$pattern" "$file" 2>/dev/null) || n=0
+  echo "${n:-0}"
+}
+
+# bun_summary_count: parses Bun's summary lines (one per `bun test` invocation
+# inside a shard — there's only one when we pass an explicit file list).
+# Looks for ` N pass` / ` N fail` / ` N skip` patterns and sums them across
+# all summary blocks the shard emitted. `bun test` prints these near the end
+# of its output. Format: leading whitespace + integer + space + label.
+bun_summary_count() {
+  local label="$1"; local file="$2"
+  if [ ! -f "$file" ]; then echo 0; return; fi
+  awk -v label="$label" '
+    $1 ~ /^[0-9]+$/ && $2 == label { total += $1 }
+    END { print total + 0 }
+  ' "$file"
+}
+
 heartbeat() {
   while true; do
     sleep 10
@@ -152,11 +177,13 @@ heartbeat() {
       else
         local lf="$LOG_DIR/shard-$i.log"
         if [ -f "$lf" ]; then
-          local p f s
-          p=$(grep -cE '^\(pass\)' "$lf" 2>/dev/null || echo 0)
-          f=$(grep -cE '^\(fail\)' "$lf" 2>/dev/null || echo 0)
-          s=$(grep -cE '^\(skip\)' "$lf" 2>/dev/null || echo 0)
-          line="$line [s$i: ${p}p ${f}f ${s}s ...]"
+          # Heartbeat: prefer Bun's per-test "✓" (passed) and "(fail)" markers
+          # so we see live progress; the "N pass" summary line only appears at
+          # the very end of the shard and would always show 0 mid-run.
+          local p f
+          p=$(grep_count '^[[:space:]]+✓' "$lf")
+          f=$(grep_count '^\(fail\)' "$lf")
+          line="$line [s$i: ${p}p ${f}f ...]"
         else
           line="$line [s$i: starting]"
         fi
@@ -192,14 +219,9 @@ for i in $(seq 1 "$N"); do
   rc=1
   [ -f "$EXIT_FILE" ] && rc=$(cat "$EXIT_FILE" 2>/dev/null || echo 1)
 
-  pass_count=0
-  fail_count=0
-  skip_count=0
-  if [ -f "$SHARD_LOG" ]; then
-    pass_count=$(grep -cE '^\(pass\)' "$SHARD_LOG" 2>/dev/null || echo 0)
-    fail_count=$(grep -cE '^\(fail\)' "$SHARD_LOG" 2>/dev/null || echo 0)
-    skip_count=$(grep -cE '^\(skip\)' "$SHARD_LOG" 2>/dev/null || echo 0)
-  fi
+  pass_count=$(bun_summary_count "pass" "$SHARD_LOG")
+  fail_count=$(bun_summary_count "fail" "$SHARD_LOG")
+  skip_count=$(bun_summary_count "skip" "$SHARD_LOG")
   TOTAL_PASS=$((TOTAL_PASS + pass_count))
   TOTAL_FAILURES=$((TOTAL_FAILURES + fail_count))
   TOTAL_SKIP=$((TOTAL_SKIP + skip_count))
@@ -269,7 +291,7 @@ if [ "$SERIAL_FILES_COUNT" -gt 0 ]; then
   cat "$LOG_DIR/serial.log"
   if [ "$SERIAL_RC" != "0" ]; then
     TOTAL_RC=1
-    s_fail=$(grep -cE '^\(fail\)' "$LOG_DIR/serial.log" 2>/dev/null || echo 0)
+    s_fail=$(bun_summary_count "fail" "$LOG_DIR/serial.log")
     TOTAL_FAILURES=$((TOTAL_FAILURES + s_fail))
     if [ "$s_fail" -gt 0 ]; then
       awk '
@@ -288,7 +310,7 @@ if [ "$SERIAL_FILES_COUNT" -gt 0 ]; then
     fi
     echo "serial: rc=$SERIAL_RC fail=$s_fail" >> "$SUMMARY_FILE"
   else
-    s_pass=$(grep -cE '^\(pass\)' "$LOG_DIR/serial.log" 2>/dev/null || echo 0)
+    s_pass=$(bun_summary_count "pass" "$LOG_DIR/serial.log")
     TOTAL_PASS=$((TOTAL_PASS + s_pass))
     echo "serial: pass=$s_pass rc=0" >> "$SUMMARY_FILE"
   fi
