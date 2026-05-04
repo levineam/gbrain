@@ -2,6 +2,108 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.28.1] - 2026-05-03
+
+**LongMemEval lands in the box. Spin up an isolated brain, fill it with one
+question's haystack, search it, score it, throw it away. 500 questions in
+under an hour, zero pollution, hermetic CI.**
+
+`gbrain eval longmemeval <dataset.jsonl>` runs the public LongMemEval
+benchmark directly against gbrain's hybrid retrieval. Each question gets a
+clean in-memory PGLite, its haystack imported, the question asked, the
+hypothesis emitted as JSONL — exactly the shape LongMemEval's `evaluate_qa.py`
+consumes. The user's `~/.gbrain` brain is never opened. Retrieved chat
+content is sanitized with the same `INJECTION_PATTERNS` that protect takes
+from prompt-injection. `<chat_session>` structural framing tells the model
+the haystack is data, not instructions.
+
+### The numbers that matter
+
+Real measurements from `bun test test/eval-longmemeval.test.ts` on Apple
+Silicon:
+
+| Metric | Value |
+|---|---|
+| Warm reset + import 5 pages + search (p50) | 25.9ms |
+| Warm reset + import 5 pages + search (p99) | 30.3ms |
+| Cold PGLite connect (one-time per run) | ~1-3s |
+| Hermetic CI test count (no DATABASE_URL, no API keys) | 23 |
+| Schema tables enumerated at runtime for reset | 35+ |
+
+Per-question cost is well under the 500ms speed gate. The harness scales
+linearly: 500 questions in ~13s of overhead plus your retrieval + LLM
+latency.
+
+**What this means for you**: regression-test gbrain's retrieval against a
+public benchmark before you merge. Run the harness against a prototype, get
+a JSONL out, hand it to LongMemEval's evaluator, decide whether to ship.
+The benchmark people already cite is now one CLI command away.
+
+### Itemized changes
+
+#### New CLI surface
+
+- `gbrain eval longmemeval <dataset.jsonl>` — run LongMemEval against gbrain hybrid retrieval.
+  Flags: `--limit N`, `--model M`, `--retrieval-only`, `--keyword-only`,
+  `--expansion`, `--top-k K`, `--output FILE`. Dataset is a positional path; download
+  from `https://huggingface.co/datasets/xiaowu0162/longmemeval`.
+- `gbrain eval longmemeval --help` works without a configured brain (hermeticity gate).
+
+#### New retrieval defaults for benchmarks
+
+- `--expansion` defaults to OFF (deterministic, no per-query Haiku call). Pass `--expansion`
+  to opt into multi-query expansion, matching gbrain's interactive default.
+- Default model resolves through `resolveModel()` 6-tier chain with `models.eval.longmemeval`
+  as the new config key. `--model` flag overrides; `GBRAIN_MODEL` env var honored.
+
+#### Sanitization parity with takes
+
+- `INJECTION_PATTERNS` exported from `src/core/think/sanitize.ts`. The benchmark
+  harness re-uses the same pattern set so adding a new injection pattern automatically
+  covers takes AND benchmarks. One source of truth.
+- Retrieved chat content is wrapped in `<chat_session id="..." date="..."` tags. The
+  answer-gen system prompt declares the content UNTRUSTED. Same posture as `<take>` framing.
+
+#### Architecture
+
+- One in-memory PGLite per benchmark run. `TRUNCATE` between questions, runtime-enumerated
+  tables via `pg_tables` so future schema migrations don't silently leak across questions.
+  Infrastructure tables (`sources`, `config`, `gbrain_cycle_locks`, `subagent_rate_leases`)
+  preserved across resets.
+- The harness creates its own engine via `createBenchmarkBrain` + `withBenchmarkBrain`;
+  `cli.ts` skips `connectEngine()` for `eval longmemeval` so the user's brain is never touched.
+- LLM injection seam: `runEvalLongMemEval(args, {client?: ThinkLLMClient})`. Tests stub
+  the client so the full pipeline runs without an Anthropic API key.
+
+#### For contributors
+
+- New: `src/eval/longmemeval/{harness,adapter,sanitize}.ts`, `src/commands/eval-longmemeval.ts`.
+- New tests: `test/eval-longmemeval.test.ts` (12 cases) + `test/longmemeval-sanitize.test.ts`
+  (12 cases). All hermetic — no `DATABASE_URL`, no API keys.
+- New fixture: `test/fixtures/longmemeval-mini.jsonl` (5 hand-authored questions).
+- One-line edit: `INJECTION_PATTERNS` exported from `src/core/think/sanitize.ts:19`.
+- One-line edit: `src/cli.ts` pre-dispatch bypass for `eval longmemeval`.
+
+## To take advantage of v0.28.1
+
+`gbrain upgrade` should pick this up automatically. To run the benchmark:
+
+1. Download the LongMemEval dataset:
+   ```bash
+   # Visit https://huggingface.co/datasets/xiaowu0162/longmemeval
+   # download longmemeval_oracle.json (or _s.json) to a local path
+   ```
+2. Run the benchmark:
+   ```bash
+   gbrain eval longmemeval ./longmemeval_oracle.json --limit 50 --retrieval-only > /tmp/hypothesis.jsonl
+   wc -l /tmp/hypothesis.jsonl    # should be 50
+   ```
+3. Score the hypotheses with LongMemEval's evaluator (their published `evaluate_qa.py`,
+   not bundled here — needs OpenAI gpt-4o per their spec).
+
+If `gbrain doctor` warns about anything after upgrade, please file an issue:
+https://github.com/garrytan/gbrain/issues with the doctor output.
+
 ## [0.28.0] - 2026-05-01
 
 **The brain finally captures what you BELIEVE, not just what's true.**
