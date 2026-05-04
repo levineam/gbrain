@@ -6,7 +6,7 @@
  */
 
 import { listRecipes, getRecipe } from '../core/ai/recipes/index.ts';
-import { configureGateway, embedOne, isAvailable as gwIsAvailable } from '../core/ai/gateway.ts';
+import { configureGateway, embedOne, isAvailable as gwIsAvailable, chat as gwChat } from '../core/ai/gateway.ts';
 import { probeOllama, probeLMStudio } from '../core/ai/probes.ts';
 import { loadConfig } from '../core/config.ts';
 import { AIConfigError, AITransientError } from '../core/ai/errors.ts';
@@ -14,12 +14,16 @@ import type { Recipe } from '../core/ai/types.ts';
 
 const SCHEMA_VERSION = 1;
 
+type TouchpointFilter = 'embedding' | 'expansion' | 'chat';
+
 interface ProviderOption {
   id: string;
-  touchpoint: 'embedding' | 'expansion';
+  touchpoint: TouchpointFilter;
   model: string;
   dims?: number;
   cost_per_1m_tokens_usd?: number;
+  cost_per_1m_input_usd?: number;
+  cost_per_1m_output_usd?: number;
   price_last_verified?: string;
   env_ready: boolean;
   tier: 'native' | 'openai-compat';
@@ -33,6 +37,8 @@ function configureFromEnv(): void {
     embedding_model: config?.embedding_model,
     embedding_dimensions: config?.embedding_dimensions,
     expansion_model: config?.expansion_model,
+    chat_model: config?.chat_model,
+    chat_fallback_chain: config?.chat_fallback_chain,
     base_urls: config?.provider_base_urls,
     env: { ...process.env },
   });
@@ -72,14 +78,20 @@ function printHelp(): void {
   console.log(`gbrain providers — AI provider status and testing
 
 USAGE
-  gbrain providers list              List all known providers + status
-  gbrain providers test [--model ID] Smoke-test configured (or specified) providers
-  gbrain providers env <id>          Show env vars required/optional for a provider
-  gbrain providers explain [--json]  Emit a provider choice matrix (agent-friendly)
+  gbrain providers list                                   List all known providers + status
+  gbrain providers test [--touchpoint T] [--model ID]     Smoke-test configured (or specified) providers
+  gbrain providers env <id>                               Show env vars required/optional for a provider
+  gbrain providers explain [--json]                       Emit a provider choice matrix (agent-friendly)
+
+TOUCHPOINTS
+  --touchpoint embedding (default)  Probes embed_one("...")
+  --touchpoint chat                 Probes chat({messages: [{role:'user', content:'ping'}]})
 
 EXAMPLES
   gbrain providers list
   gbrain providers test --model openai:text-embedding-3-large
+  gbrain providers test --touchpoint chat --model anthropic:claude-haiku-4-5
+  gbrain providers test --touchpoint chat --model deepseek:deepseek-chat
   gbrain providers env ollama
   gbrain providers explain --json
 `);
@@ -88,18 +100,20 @@ EXAMPLES
 function runList(_args: string[]): void {
   const recipes = listRecipes();
   const rows: string[] = [];
-  rows.push('PROVIDER'.padEnd(14) + 'TIER'.padEnd(18) + 'EMBEDDING'.padEnd(12) + 'EXPANSION'.padEnd(12) + 'STATUS');
-  rows.push('-'.repeat(70));
+  rows.push('PROVIDER'.padEnd(14) + 'TIER'.padEnd(18) + 'EMBED'.padEnd(8) + 'EXPAND'.padEnd(8) + 'CHAT'.padEnd(8) + 'STATUS');
+  rows.push('-'.repeat(78));
   for (const r of recipes) {
     const hasEmbed = !!r.touchpoints.embedding && (r.touchpoints.embedding.models.length > 0);
     const hasExpand = !!r.touchpoints.expansion;
+    const hasChat = !!r.touchpoints.chat && r.touchpoints.chat.models.length > 0;
     const ready = envReady(r);
     const status = ready ? '✓ ready' : `✗ missing ${r.auth_env?.required?.[0] ?? 'setup'}`;
     rows.push(
       r.id.padEnd(14) +
       r.tier.padEnd(18) +
-      (hasEmbed ? 'yes' : '—').padEnd(12) +
-      (hasExpand ? 'yes' : '—').padEnd(12) +
+      (hasEmbed ? 'yes' : '—').padEnd(8) +
+      (hasExpand ? 'yes' : '—').padEnd(8) +
+      (hasChat ? 'yes' : '—').padEnd(8) +
       status,
     );
   }
@@ -110,30 +124,55 @@ async function runTest(args: string[]): Promise<void> {
   const modelIdx = args.indexOf('--model');
   const modelArg = modelIdx >= 0 ? args[modelIdx + 1] : undefined;
 
-  // If --model passed, override gateway for this test
+  const tpIdx = args.indexOf('--touchpoint');
+  const tpArg = (tpIdx >= 0 ? args[tpIdx + 1] : 'embedding') as TouchpointFilter;
+
+  if (tpArg !== 'embedding' && tpArg !== 'chat') {
+    console.error(`--touchpoint must be 'embedding' or 'chat' (got: ${tpArg}).`);
+    process.exit(1);
+  }
+
+  // If --model passed, override gateway for this test (touchpoint-aware).
   if (modelArg) {
     const [providerId, ...modelParts] = modelArg.split(':');
     const modelId = modelParts.join(':');
     const recipe = getRecipe(providerId);
-    const dims = recipe?.touchpoints.embedding?.default_dims ?? 1536;
-    configureGateway({
-      embedding_model: modelArg,
-      embedding_dimensions: dims,
-      env: { ...process.env },
-    });
+    if (tpArg === 'embedding') {
+      const dims = recipe?.touchpoints.embedding?.default_dims ?? 1536;
+      configureGateway({
+        embedding_model: modelArg,
+        embedding_dimensions: dims,
+        env: { ...process.env },
+      });
+    } else {
+      configureGateway({
+        chat_model: modelArg,
+        env: { ...process.env },
+      });
+    }
   }
 
-  if (!gwIsAvailable('embedding')) {
-    console.error('Embedding provider not configured or not ready. Run `gbrain providers list` to see status.');
+  if (!gwIsAvailable(tpArg)) {
+    console.error(`${tpArg[0]?.toUpperCase()}${tpArg.slice(1)} provider not configured or not ready. Run \`gbrain providers list\` to see status.`);
     process.exit(1);
   }
 
-  console.log('Probing embedding provider...');
+  console.log(`Probing ${tpArg} provider...`);
   const start = Date.now();
   try {
-    const v = await embedOne('gbrain smoke test');
-    const ms = Date.now() - start;
-    console.log(`  ✓ ${ms}ms, ${v.length} dims`);
+    if (tpArg === 'embedding') {
+      const v = await embedOne('gbrain smoke test');
+      const ms = Date.now() - start;
+      console.log(`  ✓ ${ms}ms, ${v.length} dims`);
+    } else {
+      const result = await gwChat({
+        messages: [{ role: 'user', content: 'Reply with just the word: pong' }],
+        maxTokens: 16,
+      });
+      const ms = Date.now() - start;
+      const preview = (result.text || '<empty>').replace(/\s+/g, ' ').slice(0, 80);
+      console.log(`  ✓ ${ms}ms · model=${result.model} · stop=${result.stopReason} · in=${result.usage.input_tokens}/out=${result.usage.output_tokens} · "${preview}"`);
+    }
     console.log('\nAll probes green.');
   } catch (e) {
     const ms = Date.now() - start;
@@ -200,6 +239,9 @@ async function runExplain(args: string[]): Promise<void> {
     GOOGLE_GENERATIVE_AI_API_KEY: !!process.env.GOOGLE_GENERATIVE_AI_API_KEY,
     ANTHROPIC_API_KEY: !!process.env.ANTHROPIC_API_KEY,
     VOYAGE_API_KEY: !!process.env.VOYAGE_API_KEY,
+    DEEPSEEK_API_KEY: !!process.env.DEEPSEEK_API_KEY,
+    GROQ_API_KEY: !!process.env.GROQ_API_KEY,
+    TOGETHER_API_KEY: !!process.env.TOGETHER_API_KEY,
   };
 
   // Parallel probes for local providers (1s timeout each)
@@ -233,6 +275,21 @@ async function runExplain(args: string[]): Promise<void> {
         env_ready: envReady(r),
         tier: r.tier,
         pros: prosFor(r, 'expansion'),
+        cons: consFor(r),
+      });
+    }
+    if (r.touchpoints.chat && r.touchpoints.chat.models.length > 0) {
+      const m = r.touchpoints.chat;
+      options.push({
+        id: `${r.id}:${m.models[0]}`,
+        touchpoint: 'chat',
+        model: m.models[0],
+        cost_per_1m_input_usd: m.cost_per_1m_input_usd,
+        cost_per_1m_output_usd: m.cost_per_1m_output_usd,
+        price_last_verified: m.price_last_verified,
+        env_ready: envReady(r),
+        tier: r.tier,
+        pros: prosFor(r, 'chat'),
         cons: consFor(r),
       });
     }
@@ -278,6 +335,13 @@ async function runExplain(args: string[]): Promise<void> {
     console.log(`  ${o.env_ready ? '✓' : '✗'} ${o.id.padEnd(44)} ${cost.padEnd(10)} ${o.tier}`);
   }
   console.log('');
+  console.log('Chat options:');
+  for (const o of options.filter(x => x.touchpoint === 'chat')) {
+    const inCost = o.cost_per_1m_input_usd !== undefined ? `in $${o.cost_per_1m_input_usd}` : '—';
+    const outCost = o.cost_per_1m_output_usd !== undefined ? `out $${o.cost_per_1m_output_usd}` : '—';
+    console.log(`  ${o.env_ready ? '✓' : '✗'} ${o.id.padEnd(44)} ${inCost.padEnd(12)} ${outCost.padEnd(12)} ${o.tier}`);
+  }
+  console.log('');
   console.log(`Recommended: ${matrix.recommended}`);
   console.log(`  ${matrix.recommended_reason}`);
   console.log('');
@@ -285,8 +349,17 @@ async function runExplain(args: string[]): Promise<void> {
   console.log(`  gbrain init --embedding-model ${matrix.recommended.split(':')[0]}:${matrix.recommended.split(':').slice(1).join(':')}`);
 }
 
-function prosFor(r: Recipe, touchpoint: 'embedding' | 'expansion'): string[] {
+function prosFor(r: Recipe, touchpoint: TouchpointFilter): string[] {
   const out: string[] = [];
+  if (touchpoint === 'chat') {
+    if (r.id === 'anthropic') out.push('Default subagent driver', 'Prompt-cache support', 'Strong tool calling');
+    else if (r.id === 'openai') out.push('Strong tool calling', 'Wide adapter support');
+    else if (r.id === 'google') out.push('1M context', 'Cheap');
+    else if (r.id === 'deepseek') out.push('25-40x cheaper than Anthropic', 'Strong reasoning');
+    else if (r.id === 'groq') out.push('500 tok/s inference', 'Cheap fallback');
+    else if (r.id === 'together') out.push('Open-weights house', 'Llama / Qwen / Mixtral');
+    return out;
+  }
   if (r.id === 'openai') out.push('Default', 'High quality', 'Wide compatibility');
   else if (r.id === 'google') out.push('Smaller vectors', 'Matryoshka dim flex');
   else if (r.id === 'anthropic') out.push('Default expansion model', 'Best-in-class reasoning');
