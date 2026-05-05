@@ -30,6 +30,7 @@ import { z } from 'zod';
 
 import type {
   AIGatewayConfig,
+  MultimodalInput,
   Recipe,
   TouchpointKind,
 } from './types.ts';
@@ -241,6 +242,156 @@ export async function embedOne(text: string): Promise<Float32Array> {
   const [v] = await embed([text]);
   return v;
 }
+
+// ---- Multimodal embedding (v0.27.1) ----
+
+/** Voyage multimodal API caps at 32 inputs per request. */
+const MULTIMODAL_BATCH_SIZE = 32;
+/** Voyage caps each image at 20MB; the caller enforces, this is documentation. */
+const MULTIMODAL_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+
+/**
+ * v0.27.1: embed multimodal inputs (images today; video keyframes once
+ * Voyage 3.5 multimodal ships). Routes to the recipe's multimodal endpoint
+ * via direct fetch — Vercel AI SDK has no multimodal-embedding abstraction
+ * yet so we bypass it. Reuses the existing API-key resolution and
+ * dim-mismatch error pattern from embed().
+ *
+ * Today: Voyage-only. Other recipes throw AIConfigError pointing at the
+ * v0.28+ TODOs that add OpenAI/Cohere multimodal.
+ *
+ * Returns one Float32Array per input, in input order.
+ *
+ * Empty input → returns []. Preserves the `embed([])` contract.
+ */
+export async function embedMultimodal(inputs: MultimodalInput[]): Promise<Float32Array[]> {
+  if (!inputs || inputs.length === 0) return [];
+
+  const cfg = requireConfig();
+  const modelStr = cfg.embedding_model ?? DEFAULT_EMBEDDING_MODEL;
+  const { parsed, recipe } = resolveRecipe(modelStr);
+  const touchpoint = recipe.touchpoints.embedding;
+  if (!touchpoint?.supports_multimodal) {
+    throw new AIConfigError(
+      `Recipe ${recipe.id} (${parsed.modelId}) does not support multimodal embedding.`,
+      `Switch to a multimodal-capable model. Today: voyage:voyage-multimodal-3.\n` +
+      `OpenAI / Cohere multimodal support is on the v0.28+ roadmap.`,
+    );
+  }
+
+  // Voyage-specific HTTP path. When v0.28 lands additional providers, branch
+  // on recipe.id and route to each provider's multimodal endpoint.
+  if (recipe.id !== 'voyage') {
+    throw new AIConfigError(
+      `Multimodal embedding for recipe ${recipe.id} is not implemented yet (v0.27.1 ships Voyage only).`,
+    );
+  }
+
+  const apiKey = cfg.env[recipe.auth_env?.required[0] ?? 'VOYAGE_API_KEY'];
+  if (!apiKey) {
+    throw new AIConfigError(
+      `${recipe.name} requires ${recipe.auth_env?.required[0]} for multimodal embedding.`,
+      recipe.setup_hint,
+    );
+  }
+  const baseUrl = cfg.base_urls?.[recipe.id] ?? recipe.base_url_default;
+  if (!baseUrl) {
+    throw new AIConfigError(
+      `${recipe.name} requires a base URL for multimodal embedding.`,
+      recipe.setup_hint,
+    );
+  }
+
+  const expected = cfg.embedding_dimensions ?? DEFAULT_EMBEDDING_DIMENSIONS;
+  // Voyage multimodal returns 1024 dims. If the brain is configured for a
+  // different `embedding` column dim (e.g. OpenAI 1536 text), the dual-column
+  // schema lets text live in `embedding` (1536) and images in
+  // `embedding_image` (1024). The gateway-level dim assertion only fires when
+  // the caller is targeting the primary `embedding` column; for image rows
+  // landing in `embedding_image` the column itself is fixed at 1024.
+  const targetDims = 1024;
+
+  // Batch in groups of 32 (Voyage's published max). Each batch is one HTTP
+  // call; results concatenate in input order.
+  const allEmbeddings: Float32Array[] = [];
+  for (let i = 0; i < inputs.length; i += MULTIMODAL_BATCH_SIZE) {
+    const batch = inputs.slice(i, i + MULTIMODAL_BATCH_SIZE);
+    const body = {
+      inputs: batch.map(input => ({
+        // Voyage's documented shape for image inputs:
+        //   { content: [{ type: "image_base64", image_base64: "data:image/png;base64,..." }] }
+        content: [
+          {
+            type: 'image_base64',
+            image_base64: `data:${input.mime};base64,${input.data}`,
+          },
+        ],
+      })),
+      model: parsed.modelId,
+      input_type: 'document',
+    };
+
+    let res: Response;
+    try {
+      res = await fetch(`${baseUrl}/multimodalembeddings`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      throw normalizeAIError(err, `embedMultimodal(${recipe.id}:${parsed.modelId})`);
+    }
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      if (res.status === 401 || res.status === 403) {
+        throw new AIConfigError(
+          `Voyage multimodal returned ${res.status}: ${text || 'auth failed'}.`,
+          `Re-export ${recipe.auth_env?.required[0]} or rotate the key at ${recipe.auth_env?.setup_url}.`,
+        );
+      }
+      // 429 / 5xx are transient; let the caller retry.
+      throw new AITransientError(
+        `Voyage multimodal returned ${res.status}: ${text || 'transient error'}.`,
+      );
+    }
+
+    let parsedBody: { data?: Array<{ embedding: number[] }> };
+    try {
+      parsedBody = (await res.json()) as { data?: Array<{ embedding: number[] }> };
+    } catch (err) {
+      throw new AITransientError(
+        `Voyage multimodal returned malformed JSON: ${err instanceof Error ? err.message : String(err)}.`,
+      );
+    }
+    if (!parsedBody.data || !Array.isArray(parsedBody.data) || parsedBody.data.length !== batch.length) {
+      throw new AITransientError(
+        `Voyage multimodal returned unexpected payload shape (expected ${batch.length} embeddings).`,
+      );
+    }
+
+    for (const row of parsedBody.data) {
+      if (!Array.isArray(row.embedding) || row.embedding.length !== targetDims) {
+        throw new AIConfigError(
+          `Voyage multimodal returned ${row.embedding?.length ?? 0}-dim vector; expected ${targetDims}.`,
+          `Voyage multimodal-3 is fixed at 1024 dims. Brain primary embedding dim is ${expected} ` +
+          `(used by the text path). Image vectors land in content_chunks.embedding_image (1024).`,
+        );
+      }
+      allEmbeddings.push(new Float32Array(row.embedding));
+    }
+  }
+
+  return allEmbeddings;
+}
+
+// Documentation pointer: callers must size-check before calling. Voyage caps
+// each input at MULTIMODAL_MAX_IMAGE_BYTES (20MB). importImageFile enforces
+// this and routes oversize files to sync_failures.jsonl.
+void MULTIMODAL_MAX_IMAGE_BYTES;
 
 // ---- Expansion ----
 
