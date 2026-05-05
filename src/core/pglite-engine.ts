@@ -792,7 +792,11 @@ export class PGLiteEngine implements BrainEngine {
     // v0.20.0 Cathedral II Layer 6: adds parent_symbol_path / doc_comment /
     // symbol_name_qualified so nested-chunk emission (A3) and eventual A1
     // edge resolution can round-trip metadata through upserts.
-    const cols = '(page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at, language, symbol_name, symbol_type, start_line, end_line, parent_symbol_path, doc_comment, symbol_name_qualified)';
+    // v0.27.1 (Phase 8): added `modality` + `embedding_image` to the column
+    // list. Image chunks pass embedding=null + embedding_image=Float32Array
+    // (1024-dim Voyage). Text/code chunks pass embedding=Float32Array +
+    // embedding_image=null. Default modality='text' when omitted.
+    const cols = '(page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at, language, symbol_name, symbol_type, start_line, end_line, parent_symbol_path, doc_comment, symbol_name_qualified, modality, embedding_image)';
     const rowParts: string[] = [];
     const params: unknown[] = [];
     let paramIdx = 1;
@@ -801,29 +805,38 @@ export class PGLiteEngine implements BrainEngine {
       const embeddingStr = chunk.embedding
         ? '[' + Array.from(chunk.embedding).join(',') + ']'
         : null;
+      const embeddingImageStr = chunk.embedding_image
+        ? '[' + Array.from(chunk.embedding_image).join(',') + ']'
+        : null;
       const parentPath = chunk.parent_symbol_path && chunk.parent_symbol_path.length > 0
         ? chunk.parent_symbol_path
         : null;
+      const modality = chunk.modality ?? 'text';
 
-      if (embeddingStr) {
-        rowParts.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::vector, $${paramIdx++}, $${paramIdx++}, now(), $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::text[], $${paramIdx++}, $${paramIdx++})`);
-        params.push(
-          pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source,
-          embeddingStr, chunk.model || 'text-embedding-3-large', chunk.token_count || null,
-          chunk.language || null, chunk.symbol_name || null, chunk.symbol_type || null,
-          chunk.start_line ?? null, chunk.end_line ?? null,
-          parentPath, chunk.doc_comment || null, chunk.symbol_name_qualified || null,
-        );
-      } else {
-        rowParts.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::text[], $${paramIdx++}, $${paramIdx++})`);
-        params.push(
-          pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source,
-          chunk.model || 'text-embedding-3-large', chunk.token_count || null,
-          chunk.language || null, chunk.symbol_name || null, chunk.symbol_type || null,
-          chunk.start_line ?? null, chunk.end_line ?? null,
-          parentPath, chunk.doc_comment || null, chunk.symbol_name_qualified || null,
-        );
-      }
+      // Inline ::vector NULL literals to avoid a per-branch placeholder.
+      const embeddingPh = embeddingStr ? `$${paramIdx++}::vector` : 'NULL';
+      const embeddedAtPh = embeddingStr ? 'now()' : 'NULL';
+      const embeddingImagePh = embeddingImageStr ? `$${paramIdx++}::vector` : 'NULL';
+
+      rowParts.push(
+        `($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, ` +
+        `${embeddingPh}, $${paramIdx++}, $${paramIdx++}, ${embeddedAtPh}, ` +
+        `$${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, ` +
+        `$${paramIdx++}::text[], $${paramIdx++}, $${paramIdx++}, ` +
+        `$${paramIdx++}, ${embeddingImagePh})`,
+      );
+
+      // Param order MUST match the placeholder order built above.
+      if (embeddingStr) params.push(embeddingStr);
+      params.push(
+        pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source,
+        chunk.model || 'text-embedding-3-large', chunk.token_count || null,
+        chunk.language || null, chunk.symbol_name || null, chunk.symbol_type || null,
+        chunk.start_line ?? null, chunk.end_line ?? null,
+        parentPath, chunk.doc_comment || null, chunk.symbol_name_qualified || null,
+        modality,
+      );
+      if (embeddingImageStr) params.push(embeddingImageStr);
     }
 
     // CONSISTENCY: when chunk_text changes and no new embedding is supplied, BOTH embedding AND
@@ -848,7 +861,9 @@ export class PGLiteEngine implements BrainEngine {
          end_line = EXCLUDED.end_line,
          parent_symbol_path = EXCLUDED.parent_symbol_path,
          doc_comment = EXCLUDED.doc_comment,
-         symbol_name_qualified = EXCLUDED.symbol_name_qualified`,
+         symbol_name_qualified = EXCLUDED.symbol_name_qualified,
+         modality = EXCLUDED.modality,
+         embedding_image = COALESCE(EXCLUDED.embedding_image, content_chunks.embedding_image)`,
       params
     );
   }

@@ -1491,9 +1491,9 @@ export const MIGRATIONS: Migration[] = [
         }
       }
 
-      // Step 1: schema delta on content_chunks (both engines). Runs through
-      // engine.runMigration so multi-statement DDL works on PGLite (which
-      // routes to db.exec) and Postgres (which routes to sql.unsafe).
+      // Step 1: schema delta on content_chunks + widen pages.page_kind CHECK
+      // to admit 'image'. Runs through engine.runMigration so multi-statement
+      // DDL works on PGLite (db.exec) and Postgres (sql.unsafe).
       await engine.runMigration(36, `
         ALTER TABLE content_chunks
           ADD COLUMN IF NOT EXISTS modality TEXT NOT NULL DEFAULT 'text',
@@ -1502,6 +1502,13 @@ export const MIGRATIONS: Migration[] = [
         CREATE INDEX IF NOT EXISTS idx_chunks_embedding_image
           ON content_chunks USING hnsw (embedding_image vector_cosine_ops)
           WHERE embedding_image IS NOT NULL;
+
+        -- Widen pages.page_kind CHECK to admit 'image'. The constraint name
+        -- is auto-assigned by Postgres; locate + drop + recreate with the
+        -- new value list. PGLite + Postgres share the same constraint shape.
+        ALTER TABLE pages DROP CONSTRAINT IF EXISTS pages_page_kind_check;
+        ALTER TABLE pages ADD CONSTRAINT pages_page_kind_check
+          CHECK (page_kind IN ('markdown','code','image'));
       `);
 
       // Step 2: PGLite-only — add the files table that v0.18 deliberately

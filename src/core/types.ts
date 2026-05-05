@@ -157,10 +157,22 @@ export interface StaleChunkRow {
 export interface ChunkInput {
   chunk_index: number;
   chunk_text: string;
-  chunk_source: 'compiled_truth' | 'timeline' | 'fenced_code';
+  /**
+   * 'image_asset' added in v0.27.1. Image chunks live in content_chunks
+   * alongside text/code chunks; modality='image' rows are filtered out of
+   * searchKeyword by default so OCR text doesn't drown text-page search.
+   */
+  chunk_source: 'compiled_truth' | 'timeline' | 'fenced_code' | 'image_asset';
   embedding?: Float32Array;
   model?: string;
   token_count?: number;
+  /**
+   * v0.27.1 multimodal. modality 'image' carries its 1024-dim Voyage vector
+   * in embedding_image (not embedding). Markdown + code chunks omit both
+   * fields and inherit modality='text' via column DEFAULT.
+   */
+  modality?: 'text' | 'image';
+  embedding_image?: Float32Array;
   /**
    * v0.19.0: optional code-chunk metadata. Populated by importCodeFile from
    * the tree-sitter AST; NULL for markdown chunks. Drives `query --lang`,

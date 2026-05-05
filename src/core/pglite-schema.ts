@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS pages (
   type          TEXT    NOT NULL,
   -- v0.19.0: markdown vs code distinction at the DB level.
   page_kind     TEXT    NOT NULL DEFAULT 'markdown'
-                CHECK (page_kind IN ('markdown','code')),
+                CHECK (page_kind IN ('markdown','code','image')),
   title         TEXT    NOT NULL,
   compiled_truth TEXT   NOT NULL DEFAULT '',
   timeline      TEXT    NOT NULL DEFAULT '',
