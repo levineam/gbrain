@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { readFileSync } from 'fs';
-import { loadConfig, toEngineConfig } from './core/config.ts';
+import { loadConfig, loadConfigWithEngine, toEngineConfig } from './core/config.ts';
 import type { BrainEngine } from './core/engine.ts';
 import { operations, OperationError } from './core/operations.ts';
 import type { Operation, OperationContext } from './core/operations.ts';
@@ -646,6 +646,33 @@ async function connectEngine(): Promise<BrainEngine> {
                   process.env.GBRAIN_NO_RETRY_CONNECT === '1';
   const { connectWithRetry } = await import('./core/db.ts');
   await connectWithRetry(engine, toEngineConfig(config), { noRetry });
+
+  // v0.27.1 (F3 fix): re-merge DB-plane config now that the engine is up.
+  // Flags like `embedding_multimodal` are user-mutable via `gbrain config set`
+  // (DB plane) and need to flow into the gateway after connect. Schema-sizing
+  // fields (embedding_dimensions etc.) keep their pre-connect file/env values
+  // — those drove initSchema and the merged config respects file/env first.
+  try {
+    const merged = await loadConfigWithEngine(engine, config);
+    if (merged) {
+      // Only re-configure when a runtime-relevant DB flag actually overrode
+      // a pre-connect default. Today the only consumer is the import-image
+      // path; the gateway itself doesn't read these flags. The stash on
+      // process.env preserves the contract for downstream readers without
+      // changing the gateway's signature.
+      if (merged.embedding_multimodal !== undefined) {
+        process.env.GBRAIN_EMBEDDING_MULTIMODAL = String(merged.embedding_multimodal);
+      }
+      if (merged.embedding_image_ocr !== undefined) {
+        process.env.GBRAIN_EMBEDDING_IMAGE_OCR = String(merged.embedding_image_ocr);
+      }
+      if (merged.embedding_image_ocr_model !== undefined) {
+        process.env.GBRAIN_EMBEDDING_IMAGE_OCR_MODEL = merged.embedding_image_ocr_model;
+      }
+    }
+  } catch {
+    // Non-fatal. Pre-v36 brains may not have a usable config table yet.
+  }
   return engine;
 }
 
