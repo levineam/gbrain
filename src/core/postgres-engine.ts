@@ -545,6 +545,10 @@ export class PostgresEngine implements BrainEngine {
           ${symbolKindClause}
           ${hardExcludeClause}
           ${visibilityClause}
+          -- v0.27.1: hide image rows from text-keyword search so OCR text
+          -- doesn't drown text-page hits. Image search runs a separate
+          -- vector path on embedding_image.
+          AND cc.modality = 'text'
         ORDER BY score DESC
         LIMIT ${innerLimitParam}
       ),

@@ -7,7 +7,7 @@ import { parseMarkdown } from './markdown.ts';
 import { chunkText } from './chunkers/recursive.ts';
 import { chunkCodeText, chunkCodeTextFull, detectCodeLanguage, CHUNKER_VERSION } from './chunkers/code.ts';
 import { findChunkForOffset } from './chunkers/edge-extractor.ts';
-import { extractCodeRefs } from './link-extraction.ts';
+import { extractCodeRefs, imageOfCandidates } from './link-extraction.ts';
 import { embedBatch, embedMultimodal } from './embedding.ts';
 import { slugifyPath, slugifyCodePath, isCodeFilePath } from './sync.ts';
 import type { ChunkInput, PageInput, PageType } from './types.ts';
@@ -952,6 +952,25 @@ export async function importImageFile(
     },
     chunks: [chunk],
     file: fileSpec,
+    after: async (tx) => {
+      // Cherry-3: path-proximity auto-link to a sibling text page. The first
+      // matching candidate gets an image_of edge. Best-effort — addLink
+      // throws when the target doesn't exist; we silently skip for now and
+      // let `gbrain reconcile-links` pick up later additions.
+      for (const candidate of imageOfCandidates(imageSlug)) {
+        const sibling = await tx.getPage(candidate);
+        if (sibling) {
+          try {
+            await tx.addLink(
+              imageSlug, candidate,
+              filename,
+              'image_of', 'manual', imageSlug, 'frontmatter',
+            );
+          } catch { /* sibling vanished mid-tx; skip */ }
+          break; // one canonical link per image
+        }
+      }
+    },
   });
 
   return { slug: imageSlug, status: 'imported', chunks: 1 };
