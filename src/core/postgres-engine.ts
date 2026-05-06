@@ -2304,9 +2304,20 @@ export class PostgresEngine implements BrainEngine {
     const weights = rows.map(r => r.weight);
     // Composite-keyed UPDATE FROM unnest (codex C4#3): pages.slug is unique
     // only within a source, so a slug-only join would fan out across sources.
+    //
+    // v0.29.1: bump salience_touched_at to NOW() ONLY when emotional_weight
+    // actually changes. The salience query window then includes the page in
+    // GREATEST(updated_at, salience_touched_at) >= boundary, so a previously
+    // calm page that just became salient surfaces in the recent salience
+    // results without a content edit. No-op writes (same weight) leave
+    // salience_touched_at alone — preserves "actual change" semantics.
     const result = await sql`
       UPDATE pages
-         SET emotional_weight = u.weight
+         SET emotional_weight = u.weight,
+             salience_touched_at = CASE
+               WHEN pages.emotional_weight IS DISTINCT FROM u.weight THEN now()
+               ELSE pages.salience_touched_at
+             END
         FROM unnest(${slugs}::text[], ${sourceIds}::text[], ${weights}::real[])
           AS u(slug, source_id, weight)
        WHERE pages.slug = u.slug AND pages.source_id = u.source_id
@@ -2357,7 +2368,7 @@ export class PostgresEngine implements BrainEngine {
                AS score
         FROM pages p
         LEFT JOIN takes t ON t.page_id = p.id AND t.active = TRUE
-       WHERE p.updated_at >= ${boundaryIso}::timestamptz
+       WHERE GREATEST(p.updated_at, COALESCE(p.salience_touched_at, p.updated_at)) >= ${boundaryIso}::timestamptz
          ${prefixCondition}
        GROUP BY p.id
        ORDER BY score DESC

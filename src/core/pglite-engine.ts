@@ -2213,9 +2213,16 @@ export class PGLiteEngine implements BrainEngine {
     const sourceIds = rows.map(r => r.source_id);
     const weights = rows.map(r => r.weight);
     // Composite-keyed UPDATE FROM unnest (codex C4#3).
+    // v0.29.1: bump salience_touched_at when emotional_weight actually changes
+    // so the salience query window picks up newly-salient old pages. Mirror
+    // of postgres-engine.ts.
     const result = await this.db.query(
       `UPDATE pages
-          SET emotional_weight = u.weight
+          SET emotional_weight = u.weight,
+              salience_touched_at = CASE
+                WHEN pages.emotional_weight IS DISTINCT FROM u.weight THEN now()
+                ELSE pages.salience_touched_at
+              END
          FROM unnest($1::text[], $2::text[], $3::real[])
            AS u(slug, source_id, weight)
         WHERE pages.slug = u.slug AND pages.source_id = u.source_id
@@ -2271,7 +2278,7 @@ export class PGLiteEngine implements BrainEngine {
                 AS score
          FROM pages p
          LEFT JOIN takes t ON t.page_id = p.id AND t.active = TRUE
-        WHERE p.updated_at >= $1::timestamptz
+        WHERE GREATEST(p.updated_at, COALESCE(p.salience_touched_at, p.updated_at)) >= $1::timestamptz
           ${prefixCondition}
         GROUP BY p.id
         ORDER BY score DESC
