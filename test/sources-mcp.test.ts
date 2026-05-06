@@ -21,8 +21,6 @@ import { hasScope } from '../src/core/scope.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
 
-delete process.env.GBRAIN_PGLITE_SNAPSHOT;
-
 let engine: PGLiteEngine;
 const FAKE_GIT_DIR = join(tmpdir(), `gbrain-sources-mcp-test-${process.pid}`);
 const GBRAIN_HOME = join(FAKE_GIT_DIR, 'gbrain-home');
@@ -105,7 +103,12 @@ function ctxRemote(scopes: string[]): OperationContext {
 // ---------------------------------------------------------------------------
 
 describe('sources_* op metadata', () => {
-  const expected = [
+  const expected: Array<{
+    name: string;
+    scope: NonNullable<Operation['scope']>;
+    mutating: boolean;
+    localOnly: boolean;
+  }> = [
     { name: 'sources_add',    scope: 'sources_admin', mutating: true,  localOnly: false },
     { name: 'sources_list',   scope: 'read',          mutating: false, localOnly: false },
     { name: 'sources_remove', scope: 'sources_admin', mutating: true,  localOnly: false },

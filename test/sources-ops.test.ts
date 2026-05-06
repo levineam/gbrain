@@ -31,8 +31,6 @@ import { withEnv } from './helpers/with-env.ts';
 
 // Tier 3: every PGLite spinup path needs the snapshot env unset (test
 // infrastructure detail; matches bootstrap.test.ts pattern).
-delete process.env.GBRAIN_PGLITE_SNAPSHOT;
-
 let engine: PGLiteEngine;
 const FAKE_GIT_DIR = join(tmpdir(), `gbrain-sources-ops-test-${process.pid}`);
 const GBRAIN_HOME = join(FAKE_GIT_DIR, 'gbrain-home');

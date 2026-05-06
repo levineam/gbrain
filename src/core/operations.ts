@@ -27,7 +27,8 @@ export type ErrorCode =
   | 'storage_error'
   | 'bucket_not_found'
   | 'database_error'
-  | 'permission_denied';
+  | 'permission_denied'
+  | 'unknown_transport'; // v0.28.1: whoami fail-closed for ambiguous transport
 
 export class OperationError extends Error {
   constructor(

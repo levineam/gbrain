@@ -322,6 +322,54 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     throw new Error(hint);
   }
 
+  // v0.28: source-aware re-clone branch. When the source has a remote_url
+  // recorded (i.e. it was registered via `sources add --url`), the on-disk
+  // clone is auto-managed. validateRepoState classifies the on-disk state;
+  // we recover from missing/no-git/not-a-dir by re-cloning, refuse on
+  // url-drift or corruption with structured hints.
+  if (opts.sourceId) {
+    const { validateRepoState } = await import('../core/git-remote.ts');
+    const { recloneIfMissing } = await import('../core/sources-ops.ts');
+    const cfgRows = await engine.executeRaw<{ config: unknown }>(
+      `SELECT config FROM sources WHERE id = $1`,
+      [opts.sourceId],
+    );
+    const cfg =
+      typeof cfgRows[0]?.config === 'string'
+        ? (JSON.parse(cfgRows[0].config as string) as Record<string, unknown>)
+        : ((cfgRows[0]?.config ?? {}) as Record<string, unknown>);
+    const remoteUrl = typeof cfg.remote_url === 'string' ? cfg.remote_url : null;
+    if (remoteUrl) {
+      const state = validateRepoState(repoPath, remoteUrl);
+      switch (state) {
+        case 'healthy':
+          break;
+        case 'missing':
+        case 'no-git':
+        case 'not-a-dir':
+          console.error(
+            `[gbrain] auto-recovery: re-cloning "${opts.sourceId}" (clone state: ${state}).`,
+          );
+          await recloneIfMissing(engine, opts.sourceId);
+          break;
+        case 'corrupted':
+          throw new Error(
+            `Source "${opts.sourceId}" clone at ${repoPath} is corrupted ` +
+              `(\`git remote get-url origin\` failed). Run: ` +
+              `gbrain sources remove ${opts.sourceId} --confirm-destructive && ` +
+              `gbrain sources add ${opts.sourceId} --url ${remoteUrl}`,
+          );
+        case 'url-drift':
+          throw new Error(
+            `Source "${opts.sourceId}" clone at ${repoPath} has a remote ` +
+              `that differs from config.remote_url=${remoteUrl}. ` +
+              `Re-clone with: gbrain sources rebase-clone ${opts.sourceId} ` +
+              `(if available, else: sources remove + sources add).`,
+          );
+      }
+    }
+  }
+
   // Validate git repo
   if (!existsSync(join(repoPath, '.git'))) {
     throw new Error(`Not a git repository: ${repoPath}. GBrain sync requires a git-initialized repo.`);
