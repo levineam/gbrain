@@ -14,7 +14,7 @@ import { MAX_SEARCH_LIMIT, clampSearchLimit } from '../engine.ts';
 import type { SearchResult, SearchOpts, HybridSearchMeta } from '../types.ts';
 import { embed } from '../embedding.ts';
 import { dedupResults } from './dedup.ts';
-import { autoDetectDetail } from './intent.ts';
+import { autoDetectDetail } from './query-intent.ts';
 import { expandAnchors, hydrateChunks } from './two-pass.ts';
 import { applyRecencyBoost } from './recency.ts';
 

@@ -109,7 +109,7 @@ describe('applyRecencyBoost', () => {
 });
 
 // Intent detection tests (recency is auto-triggered by temporal intent)
-import { classifyQueryIntent } from '../src/core/search/intent.ts';
+import { classifyQueryIntent } from '../src/core/search/query-intent.ts';
 
 describe('intent classification → recency triggering', () => {
   it('"what\'s new with Ollama" → temporal (triggers recency)', () => {
