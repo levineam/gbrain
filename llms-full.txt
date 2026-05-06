@@ -2343,7 +2343,7 @@ ADMIN
   # programmatically via oauthProvider.registerClientManual() for host-repo wrappers.
   gbrain integrations                   Integration recipe dashboard
   gbrain sources list|add|remove|...    Multi-source brain management (v0.18)
-                                        v0.28.1: --url <https://...> registers a federated
+                                        v0.28.2: --url <https://...> registers a federated
                                         remote git repo; clone is auto-managed under
                                         $GBRAIN_HOME/clones/<id>/ and re-cloned on sync if
                                         it goes missing. Also exposed via MCP for remote

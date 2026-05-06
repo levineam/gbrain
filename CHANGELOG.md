@@ -2,7 +2,7 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.28.1] - 2026-05-06
+## [0.28.2] - 2026-05-06
 
 **Register a remote git URL as a brain source over HTTP MCP.**
 **Least-privilege OAuth: scoped tokens for sources management without admin keys.**
@@ -56,7 +56,7 @@ work end to end.
 
 The 4-to-0 SSH-step number is the gstack `/setup-gbrain` flow: previously
 the operator had to ssh into the brain host, run `gbrain sources add
---path <local clone>`, and re-register. Post-v0.28.1 that's a single
+--path <local clone>`, and re-register. Post-v0.28.2 that's a single
 `sources_add` MCP call from any agent with `sources_admin` scope.
 
 ### What this means for you
@@ -68,7 +68,7 @@ host), this is the v0.28 release that lets you wire those agents up
 without ever opening an SSH session. Mint a `sources_admin` token, hand
 it to the agent, the agent does the rest.
 
-### To take advantage of v0.28.1
+### To take advantage of v0.28.2
 
 `gbrain upgrade` should do this automatically. If you're running a
 gbrain HTTP server, also rebuild the admin SPA so the Register modal
