@@ -360,12 +360,41 @@ export interface SearchOpts {
    * undefined to search all sources.
    */
   sourceId?: string;
-  /** v0.27.0: filter results to pages updated/created after this date. ISO-8601 string. */
+  /**
+   * @deprecated v0.29.1: use `since` instead. Removed in v0.30.
+   * v0.27.0: filter results to pages updated/created after this date. ISO-8601 string.
+   */
   afterDate?: string;
-  /** v0.27.0: filter results to pages updated/created before this date. ISO-8601 string. */
+  /**
+   * @deprecated v0.29.1: use `until` instead. Removed in v0.30.
+   * v0.27.0: filter results to pages updated/created before this date. ISO-8601 string.
+   */
   beforeDate?: string;
-  /** v0.27.0: recency boost strength. 0 = off, 1 = moderate, 2 = aggressive. Default: auto-detected from intent. */
+  /**
+   * @deprecated v0.29.1: use `recency` ('off' | 'on' | 'strong') instead. Removed in v0.30.
+   * v0.27.0: recency boost strength. 0 = off, 1 = moderate, 2 = aggressive.
+   */
   recencyBoost?: 0 | 1 | 2;
+  /**
+   * v0.29.1: salience boost on emotional_weight + take_count. Independent of recency.
+   * 'off' (default) disables; 'on' applies a moderate boost; 'strong' more aggressive.
+   */
+  salience?: 'off' | 'on' | 'strong';
+  /**
+   * v0.29.1: recency boost on per-prefix age decay. Independent of salience.
+   * 'off' (default) disables; 'on' applies the per-prefix decay map; 'strong' multiplies by 1.5.
+   */
+  recency?: 'off' | 'on' | 'strong';
+  /**
+   * v0.29.1: ISO-8601 date OR relative duration ('7d', '2w', '1y'). Filter to
+   * pages whose effective_date >= this time. Replaces afterDate (kept as alias).
+   */
+  since?: string;
+  /**
+   * v0.29.1: same shape as `since`. Filter to effective_date <= this time.
+   * Boundary semantics: end-of-day for plain YYYY-MM-DD.
+   */
+  until?: string;
 }
 
 /**

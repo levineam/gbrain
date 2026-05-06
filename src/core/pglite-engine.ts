@@ -1226,6 +1226,48 @@ export class PGLiteEngine implements BrainEngine {
     return new Map(rows.map((r: any) => [r.slug as string, new Date(r.ts as string)]));
   }
 
+  async getEffectiveDates(refs: Array<{slug: string; source_id: string}>): Promise<Map<string, Date>> {
+    if (refs.length === 0) return new Map();
+    const slugs = refs.map(r => r.slug);
+    const sourceIds = refs.map(r => r.source_id);
+    const { rows } = await this.db.query(
+      `SELECT p.slug, p.source_id, COALESCE(p.effective_date, p.updated_at, p.created_at) AS ts
+         FROM pages p
+         JOIN unnest($1::text[], $2::text[]) AS u(slug, source_id)
+           ON p.slug = u.slug AND p.source_id = u.source_id`,
+      [slugs, sourceIds],
+    );
+    const out = new Map<string, Date>();
+    for (const r of rows as Array<{slug: string; source_id: string; ts: string | Date}>) {
+      const key = `${r.source_id}::${r.slug}`;
+      out.set(key, r.ts instanceof Date ? r.ts : new Date(r.ts));
+    }
+    return out;
+  }
+
+  async getSalienceScores(refs: Array<{slug: string; source_id: string}>): Promise<Map<string, number>> {
+    if (refs.length === 0) return new Map();
+    const slugs = refs.map(r => r.slug);
+    const sourceIds = refs.map(r => r.source_id);
+    const { rows } = await this.db.query(
+      `SELECT p.slug, p.source_id,
+              (COALESCE(p.emotional_weight, 0) * 5
+               + ln(1 + COUNT(DISTINCT t.id))) AS score
+         FROM pages p
+         JOIN unnest($1::text[], $2::text[]) AS u(slug, source_id)
+           ON p.slug = u.slug AND p.source_id = u.source_id
+         LEFT JOIN takes t ON t.page_id = p.id AND t.active = TRUE
+        GROUP BY p.id`,
+      [slugs, sourceIds],
+    );
+    const out = new Map<string, number>();
+    for (const r of rows as Array<{slug: string; source_id: string; score: number | string}>) {
+      const key = `${r.source_id}::${r.slug}`;
+      out.set(key, Number(r.score));
+    }
+    return out;
+  }
+
   async findOrphanPages(): Promise<Array<{ slug: string; title: string; domain: string | null }>> {
     const { rows } = await this.db.query(
       `SELECT

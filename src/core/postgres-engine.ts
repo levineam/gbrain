@@ -1312,6 +1312,56 @@ export class PostgresEngine implements BrainEngine {
     return new Map(rows.map(r => [r.slug as string, new Date(r.ts as string)]));
   }
 
+  async getEffectiveDates(refs: Array<{slug: string; source_id: string}>): Promise<Map<string, Date>> {
+    if (refs.length === 0) return new Map();
+    const sql = this.sql;
+    const slugs = refs.map(r => r.slug);
+    const sourceIds = refs.map(r => r.source_id);
+    // Composite-keyed: a page is unique by (source_id, slug). unnest the
+    // two arrays in lockstep so multi-source brains don't fan out across
+    // sources (codex pass-1 finding #3).
+    const rows = await sql`
+      SELECT p.slug, p.source_id, COALESCE(p.effective_date, p.updated_at, p.created_at) AS ts
+        FROM pages p
+        JOIN unnest(${slugs}::text[], ${sourceIds}::text[]) AS u(slug, source_id)
+          ON p.slug = u.slug AND p.source_id = u.source_id
+    `;
+    const out = new Map<string, Date>();
+    for (const raw of rows as unknown as Array<Record<string, unknown>>) {
+      const r = raw as { slug: string; source_id: string; ts: string | Date };
+      const key = `${r.source_id}::${r.slug}`;
+      out.set(key, r.ts instanceof Date ? r.ts : new Date(r.ts));
+    }
+    return out;
+  }
+
+  async getSalienceScores(refs: Array<{slug: string; source_id: string}>): Promise<Map<string, number>> {
+    if (refs.length === 0) return new Map();
+    const sql = this.sql;
+    const slugs = refs.map(r => r.slug);
+    const sourceIds = refs.map(r => r.source_id);
+    // Salience = emotional_weight × 5 + ln(1 + take_count). Pure mattering
+    // signal — NO time component (per D9: salience and recency are
+    // orthogonal axes). Composite-keyed for multi-source isolation.
+    const rows = await sql`
+      SELECT p.slug, p.source_id,
+             (COALESCE(p.emotional_weight, 0) * 5
+              + ln(1 + COUNT(DISTINCT t.id))) AS score
+        FROM pages p
+        JOIN unnest(${slugs}::text[], ${sourceIds}::text[]) AS u(slug, source_id)
+          ON p.slug = u.slug AND p.source_id = u.source_id
+        LEFT JOIN takes t ON t.page_id = p.id AND t.active = TRUE
+       GROUP BY p.id
+    `;
+    const out = new Map<string, number>();
+    for (const raw of rows as unknown as Array<Record<string, unknown>>) {
+      const r = raw as { slug: string; source_id: string; score: number | string };
+      const key = `${r.source_id}::${r.slug}`;
+      out.set(key, Number(r.score));
+    }
+    return out;
+  }
+
   async findOrphanPages(): Promise<Array<{ slug: string; title: string; domain: string | null }>> {
     const sql = this.sql;
     const rows = await sql`
