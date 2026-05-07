@@ -607,17 +607,15 @@ export async function runDoctor(engine: BrainEngine | null, args: string[], dbSo
         issues.push(`Dimension mismatch: provider returned ${actualDims} but config expects ${configuredDims}`);
       }
 
-      // Check DB column dimensions match
+      // Check DB column dimensions match (engine-portable; works on both
+      // Postgres and PGLite via the shared dim-check helper added in v0.28.5).
       try {
-        const dbDimRow = await engine.sql`
-          SELECT vector_dims(embedding) as dims
-          FROM content_chunks
-          WHERE embedding IS NOT NULL
-          LIMIT 1`;
-        if (dbDimRow.length > 0 && dbDimRow[0].dims !== actualDims) {
-          issues.push(`DB dimension mismatch: stored vectors are ${dbDimRow[0].dims}-dim but provider returns ${actualDims}-dim. Migration needed.`);
+        const { readContentChunksEmbeddingDim } = await import('../core/embedding-dim-check.ts');
+        const colDim = await readContentChunksEmbeddingDim(engine);
+        if (colDim.exists && colDim.dims !== null && colDim.dims !== actualDims) {
+          issues.push(`DB dimension mismatch: column is vector(${colDim.dims}) but provider returns ${actualDims}-dim. See docs/embedding-migrations.md for the manual ALTER recipe.`);
         }
-      } catch { /* no chunks with embeddings yet, that's fine */ }
+      } catch { /* column or table missing — fresh brain, fine */ }
 
       if (issues.length > 0) {
         checks.push({

@@ -229,12 +229,15 @@ function instantiateEmbedding(recipe: Recipe, modelId: string, cfg: AIGatewayCon
             }
           }
         : undefined;
+      // SDK accepts a `fetch` override at runtime but the typed settings don't
+      // expose it on this version pin; cast so v0.28.5's #680 fetch-shim
+      // (Voyage encoding_format + usage normalization) typechecks.
       const client = createOpenAICompatible({
         name: recipe.id,
         baseURL: baseUrl,
         apiKey: apiKey ?? 'unauthenticated',
         ...(voyageFetch ? { fetch: voyageFetch } : {}),
-      });
+      } as Parameters<typeof createOpenAICompatible>[0]);
       return client.textEmbeddingModel(modelId);
     }
     default:
