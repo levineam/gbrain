@@ -578,6 +578,16 @@ async function handleCliOnly(command: string, args: string[]) {
         await runOrphans(engine, args);
         break;
       }
+      case 'takes': {
+        const { runTakes } = await import('./commands/takes.ts');
+        await runTakes(engine, args);
+        break;
+      }
+      case 'think': {
+        const { runThinkCli } = await import('./commands/think.ts');
+        await runThinkCli(engine, args);
+        break;
+      }
       case 'sources': {
         const { runSources } = await import('./commands/sources.ts');
         await runSources(engine, args);

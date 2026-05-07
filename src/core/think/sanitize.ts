@@ -16,7 +16,7 @@
  * Test fixtures in test/think-sanitize.test.ts pin 30+ known attack strings.
  */
 
-// v0.28.1: exported so the longmemeval benchmark harness can reuse the same
+// v0.28.8: exported so the longmemeval benchmark harness can reuse the same
 // pattern set on retrieved chat content (src/eval/longmemeval/sanitize.ts).
 // Existing think/take consumers keep working unchanged.
 export const INJECTION_PATTERNS: Array<{ name: string; rx: RegExp; replacement: string }> = [
