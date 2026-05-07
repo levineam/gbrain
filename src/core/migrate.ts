@@ -1073,15 +1073,18 @@ export const MIGRATIONS: Migration[] = [
     },
     sql: '',
   },
-  // NOTE: v34 + v35 are the v0.28 takes migrations. Renumbered twice during
+  // NOTE: v37 + v38 are the v0.28 takes migrations. Renumbered four times during
   // the long-lived v0.28 branch as master shipped:
   //   v0.28 originally targeted v31/v32
   //   master v0.25 claimed v31 (eval_capture_tables) → renumbered to v32/v33
   //   master v0.26 claimed v32 (oauth_infrastructure) and v33
   //     (admin_dashboard_columns_v0_26_3) → renumbered to v34/v35
+  //   master v0.26.5 claimed v34 (destructive_guard_columns) → renumbered to v35/v36
+  //   master v0.26.8 + v0.27 claimed v35 (auto_rls_event_trigger) and v36
+  //     (subagent_provider_neutral_persistence_v0_27) → renumbered to v37/v38
   // Runtime sort by version ascending means source-order doesn't matter.
   {
-    version: 34,
+    version: 37,
     name: 'takes_and_synthesis_evidence',
     // v0.28: typed/weighted/attributed claims ("takes") + synthesis provenance.
     // Spec: docs/designs (CEO plan) + plan file. Schema decisions:
@@ -1204,7 +1207,7 @@ export const MIGRATIONS: Migration[] = [
     },
   },
   {
-    version: 35,
+    version: 38,
     name: 'access_tokens_permissions',
     // v0.28: per-token allow-list for takes visibility (Codex P0 #3 partial fix).
     // The complementary fix (chunker strips fenced takes content from page chunks
