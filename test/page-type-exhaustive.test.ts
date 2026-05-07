@@ -83,6 +83,7 @@ describe('PageType exhaustiveness contract', () => {
         case 'calendar-event': return 'event';
         case 'code': return 'code';
         case 'image': return 'asset';
+        case 'synthesis': return 'doc';
         default: return assertNever(t);
       }
     }
