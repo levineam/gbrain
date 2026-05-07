@@ -339,9 +339,19 @@ async function embedSubBatch(
 
     const first = result.embeddings?.[0];
     if (first && Array.isArray(first) && first.length !== expectedDims) {
+      // v0.28.5 (#672): the previous fix-hint pointed at `gbrain migrate
+      // --embedding-model … --embedding-dimensions …` but `gbrain migrate`
+      // only handles engine migration, not embedding reconfiguration. The
+      // canonical fix is the manual ALTER recipe in
+      // docs/embedding-migrations.md, surfaced inline so the user doesn't
+      // need to context-switch.
       throw new AIConfigError(
         `Embedding dim mismatch: model ${modelId} returned ${first.length} but schema expects ${expectedDims}.`,
-        `Run \`gbrain migrate --embedding-model ${getEmbeddingModel()} --embedding-dimensions ${first.length}\` or change models.`,
+        `Either change models to one that returns ${expectedDims}-d embeddings, ` +
+        `or migrate the existing brain to ${first.length}-d (destructive — see docs/embedding-migrations.md). ` +
+        `Quick recipe: DROP INDEX idx_chunks_embedding; ALTER COLUMN embedding TYPE vector(${first.length}); ` +
+        `UPDATE content_chunks SET embedding = NULL; gbrain config set embedding_dimensions ${first.length}; ` +
+        `gbrain embed --stale.`,
       );
     }
 
