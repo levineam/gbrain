@@ -51,6 +51,14 @@ postinstall hook on global installs, so schema migrations never run and the CLI
 aborts with `Aborted()` the first time it opens PGLite. Use `git clone + bun install
 && bun link` as shown above. See [#218](https://github.com/garrytan/gbrain/issues/218).
 
+**Do NOT use `bun add -g gbrain` or `npm install -g gbrain`.** The npm registry
+has an unrelated package squatting that name (`gbrain@1.3.x`) — you'd silently
+install the wrong binary and overwrite the canonical one. v0.28.5+ detects this
+and prints a recovery message on `gbrain upgrade`, but the `git clone + bun link`
+path above is the only reliable install method until we publish under
+`@garrytan/gbrain` (tracked v0.29 follow-up). See
+[#658](https://github.com/garrytan/gbrain/issues/658).
+
 ```
 3 results (hybrid search, 0.12s):
 
@@ -439,6 +447,7 @@ GBrain ships integration recipes that your agent sets up for you. Each recipe te
 | [X-to-Brain](recipes/x-to-brain.md) | — | Twitter timeline + mentions + deletions |
 | [Calendar-to-Brain](recipes/calendar-to-brain.md) | credential-gateway | Google Calendar to searchable daily pages |
 | [Meeting Sync](recipes/meeting-sync.md) | — | Circleback transcripts to brain pages with attendees |
+| [Restart Sweep](recipes/restart-sweep.md) | OpenClaw + Telegram | Detect dropped Telegram messages after OpenClaw gateway restarts |
 
 **Data research recipes** extract structured data from email into tracked brain pages. Built-in recipes for investor updates (MRR, ARR, runway, headcount), expense tracking, and company metrics. Create your own with `gbrain research init`.
 
