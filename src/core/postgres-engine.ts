@@ -1891,16 +1891,28 @@ export class PostgresEngine implements BrainEngine {
   /**
    * v0.30.0: calibration curve. Bins resolved correct/incorrect bets by stated
    * weight. Same allow-list contract as getScorecard.
+   *
+   * Real-Postgres-via-postgres.js sends scalar params as text by default, so
+   * `${bucketSize}` arrives as the string `'0.1'`. Without explicit `::float`
+   * casts the FLOOR/LEAST/multiplication contexts try to coerce text to int
+   * and bomb with `invalid input syntax for type integer: "0.1"`. PGLite is
+   * more permissive — caught at e2e parity by takes-scorecard-parity.test.ts.
    */
   async getCalibrationCurve(opts: CalibrationCurveOpts, allowList: string[] | undefined): Promise<CalibrationBucket[]> {
     const sql = this.sql;
     const bucketSize = opts.bucketSize && opts.bucketSize > 0 && opts.bucketSize <= 1 ? opts.bucketSize : 0.1;
+    const maxIdx = Math.floor(1 / bucketSize) - 1;
     const allowed = allowList ? sql`AND holder = ANY(${allowList}::text[])` : sql``;
     const holderClause = opts.holder ? sql`AND holder = ${opts.holder}` : sql``;
+    // Bucketing uses NUMERIC for exact decimal arithmetic. Going through
+    // FLOAT introduces IEEE 754 rounding (e.g. 0.7/0.1 = 6.9999..., FLOOR=6
+    // instead of the expected 7), which makes Postgres and PGLite diverge
+    // at bucket boundaries. NUMERIC is exact, so the bucket index is
+    // engine-agnostic and the parity test holds.
     const rows = await sql`
       WITH binned AS (
         SELECT
-          LEAST(FLOOR(weight / ${bucketSize})::int, ${Math.floor(1 / bucketSize) - 1})::int AS bucket_idx,
+          LEAST(FLOOR(weight::numeric / ${bucketSize}::numeric)::int, ${maxIdx}::int)::int AS bucket_idx,
           weight,
           (resolved_quality = 'correct')::int AS hit
         FROM takes
@@ -1908,11 +1920,11 @@ export class PostgresEngine implements BrainEngine {
           ${holderClause} ${allowed}
       )
       SELECT
-        (bucket_idx * ${bucketSize})::float           AS bucket_lo,
-        ((bucket_idx + 1) * ${bucketSize})::float     AS bucket_hi,
-        COUNT(*)::int                                  AS n,
-        AVG(hit)::float                                AS observed,
-        AVG(weight)::float                             AS predicted
+        (bucket_idx::numeric * ${bucketSize}::numeric)::float       AS bucket_lo,
+        ((bucket_idx + 1)::numeric * ${bucketSize}::numeric)::float AS bucket_hi,
+        COUNT(*)::int                                                AS n,
+        AVG(hit)::float                                              AS observed,
+        AVG(weight)::float                                           AS predicted
       FROM binned
       GROUP BY bucket_idx
       ORDER BY bucket_idx

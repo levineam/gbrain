@@ -1887,10 +1887,13 @@ export class PGLiteEngine implements BrainEngine {
     if (opts.holder !== undefined) { params.push(opts.holder); clauses.push(`AND holder = $${params.length}`); }
     if (allowList !== undefined) { params.push(allowList); clauses.push(`AND holder = ANY($${params.length}::text[])`); }
     const where = clauses.join(' ');
+    // NUMERIC casts for exact decimal arithmetic — keeps PGLite + Postgres
+    // bucket boundaries identical at FP-edge weights (e.g. 0.7/0.1).
+    // See parity test in test/e2e/takes-scorecard-parity.test.ts.
     const res = await this.db.query(
       `WITH binned AS (
          SELECT
-           LEAST(FLOOR(weight / $1)::int, $2)::int        AS bucket_idx,
+           LEAST(FLOOR(weight::numeric / $1::numeric)::int, $2::int)::int AS bucket_idx,
            weight,
            (resolved_quality = 'correct')::int            AS hit
          FROM takes
@@ -1898,8 +1901,8 @@ export class PGLiteEngine implements BrainEngine {
            ${where}
        )
        SELECT
-         (bucket_idx * $1)::float                          AS bucket_lo,
-         ((bucket_idx + 1) * $1)::float                    AS bucket_hi,
+         (bucket_idx::numeric * $1::numeric)::float        AS bucket_lo,
+         ((bucket_idx + 1)::numeric * $1::numeric)::float  AS bucket_hi,
          COUNT(*)::int                                     AS n,
          AVG(hit)::float                                   AS observed,
          AVG(weight)::float                                AS predicted
