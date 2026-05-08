@@ -1821,7 +1821,7 @@ export const MIGRATIONS: Migration[] = [
     `,
   },
   {
-    version: 38,
+    version: 41,
     name: 'pages_recency_columns',
     sql: '',
     // v0.29.1 — Salience-and-Recency, additive opt-in.
@@ -1896,7 +1896,7 @@ export const MIGRATIONS: Migration[] = [
     transaction: false,
   },
   {
-    version: 39,
+    version: 42,
     name: 'eval_candidates_recency_capture',
     // v0.29.1 — capture agent-explicit recency + salience choices for replay
     // reproducibility (D11 codex resolution).

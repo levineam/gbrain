@@ -67,12 +67,12 @@ export function rowToPage(row: Record<string, unknown>): Page {
     timeline: row.timeline as string,
     frontmatter: (typeof row.frontmatter === 'string' ? JSON.parse(row.frontmatter) : row.frontmatter) as Record<string, unknown>,
     content_hash: row.content_hash as string | undefined,
-    // v0.29 (column added in migration v37). Old brains pre-migration return undefined.
+    // v0.29 (column added in migration v40). Old brains pre-migration return undefined.
     emotional_weight: row.emotional_weight == null ? undefined : Number(row.emotional_weight),
     created_at: new Date(row.created_at as string),
     updated_at: new Date(row.updated_at as string),
     ...(deletedAt !== undefined && { deleted_at: deletedAt }),
-    // v0.29.1 (columns added in migration v38). Optional in SELECT projection.
+    // v0.29.1 (columns added in migration v41). Optional in SELECT projection.
     ...(effectiveDate !== undefined && { effective_date: effectiveDate }),
     ...(effectiveDateSource !== undefined && { effective_date_source: effectiveDateSource }),
     ...(importFilename !== undefined && { import_filename: importFilename }),
