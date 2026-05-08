@@ -1689,6 +1689,252 @@ export const MIGRATIONS: Migration[] = [
         ON subagent_messages (job_id, provider_id);
     `,
   },
+  {
+    version: 39,
+    name: 'multimodal_dual_column_v0_27_1',
+    // v0.27.1 multimodal ingestion. Three changes that travel together:
+    //
+    // 1. content_chunks gains `modality TEXT NOT NULL DEFAULT 'text'` so image
+    //    chunks declare themselves at the row level. Search filters use it to
+    //    keep image OCR text out of text-page keyword search by default.
+    //
+    // 2. content_chunks gains `embedding_image vector(1024)` for Voyage
+    //    multimodal embeddings. NULL on every text row; sparse on the column.
+    //    Partial HNSW index ignores NULL rows so the index footprint stays
+    //    proportional to image chunk count, not table size. Mixed-provider
+    //    brains (e.g. OpenAI 1536 text + Voyage 1024 images) can keep both
+    //    columns populated with distinct dim spaces.
+    //
+    // 3. PGLite gains the `files` table (mirroring the Postgres v0.18 shape)
+    //    so the multimodal ingest pipeline can persist binary-asset metadata
+    //    on the default engine. Image bytes never enter the DB; storage_path
+    //    references a path inside the brain repo. The v0.18 "PGLite has no
+    //    files table" omission was specific to blob storage — for path-
+    //    referenced metadata PGLite hosts it fine.
+    //
+    // Eng-3C: a preflight handler refuses if pgvector < 0.5, BEFORE any DDL
+    // fires, so the user gets a clear upgrade hint instead of a half-migrated
+    // brain mid-DDL. Postgres-only — PGLite ships pgvector built in.
+    // Handler-driven migration. The preflight pgvector check (Eng-3C) MUST
+    // run BEFORE any DDL fires; if we used `sqlFor` the runner would DDL
+    // before calling the handler. So we keep `sql` empty and let the handler
+    // run preflight + DDL in the right order.
+    sql: '',
+    handler: async (engine: BrainEngine) => {
+      // Eng-3C: refuse loudly if pgvector < 0.5 BEFORE any DDL fires.
+      // Partial HNSW indexes need HNSW (pgvector 0.5.0+). PGLite ships a
+      // recent pgvector inside its WASM bundle so this gate is Postgres-only.
+      if (engine.kind === 'postgres') {
+        const rows = await engine.executeRaw<{ extversion: string }>(
+          `SELECT extversion FROM pg_extension WHERE extname = 'vector'`
+        );
+        if (rows.length === 0) {
+          throw new Error(
+            `Migration v39 requires the pgvector extension. Install it via\n` +
+            `  CREATE EXTENSION vector;\n` +
+            `then re-run \`gbrain apply-migrations --yes\`.`
+          );
+        }
+        const version = rows[0].extversion;
+        const [maj, minStr] = version.split('.');
+        const min = parseInt(minStr ?? '0', 10);
+        const major = parseInt(maj ?? '0', 10);
+        if (major === 0 && min < 5) {
+          throw new Error(
+            `Migration v39 requires pgvector >= 0.5.0 (HNSW partial indexes).\n` +
+            `Found pgvector ${version}.\n\n` +
+            `Fix: ALTER EXTENSION vector UPDATE; then re-run \`gbrain apply-migrations --yes\`.\n` +
+            `If your Postgres provider doesn't ship pgvector >= 0.5, request\n` +
+            `an upgrade or migrate to PGLite for v0.27.1 multimodal support.`
+          );
+        }
+      }
+
+      // Step 1: schema delta on content_chunks + widen pages.page_kind CHECK
+      // to admit 'image'. Runs through engine.runMigration so multi-statement
+      // DDL works on PGLite (db.exec) and Postgres (sql.unsafe).
+      await engine.runMigration(39, `
+        ALTER TABLE content_chunks
+          ADD COLUMN IF NOT EXISTS modality TEXT NOT NULL DEFAULT 'text',
+          ADD COLUMN IF NOT EXISTS embedding_image vector(1024);
+
+        CREATE INDEX IF NOT EXISTS idx_chunks_embedding_image
+          ON content_chunks USING hnsw (embedding_image vector_cosine_ops)
+          WHERE embedding_image IS NOT NULL;
+
+        -- Widen pages.page_kind CHECK to admit 'image'. The constraint name
+        -- is auto-assigned by Postgres; locate + drop + recreate with the
+        -- new value list. PGLite + Postgres share the same constraint shape.
+        ALTER TABLE pages DROP CONSTRAINT IF EXISTS pages_page_kind_check;
+        ALTER TABLE pages ADD CONSTRAINT pages_page_kind_check
+          CHECK (page_kind IN ('markdown','code','image'));
+      `);
+
+      // Step 2: PGLite-only — add the files table that v0.18 deliberately
+      // omitted. Postgres has had it since v0.18; this is parity catch-up.
+      if (engine.kind === 'pglite') {
+        await engine.runMigration(39, `
+          CREATE TABLE IF NOT EXISTS files (
+            id           SERIAL PRIMARY KEY,
+            source_id    TEXT   NOT NULL DEFAULT 'default'
+                         REFERENCES sources(id) ON DELETE CASCADE,
+            page_slug    TEXT,
+            page_id      INTEGER REFERENCES pages(id) ON DELETE SET NULL,
+            filename     TEXT   NOT NULL,
+            storage_path TEXT   NOT NULL,
+            mime_type    TEXT,
+            size_bytes   BIGINT,
+            content_hash TEXT   NOT NULL,
+            metadata     JSONB  NOT NULL DEFAULT '{}',
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE(storage_path)
+          );
+
+          CREATE INDEX IF NOT EXISTS idx_files_page ON files(page_slug);
+          CREATE INDEX IF NOT EXISTS idx_files_page_id ON files(page_id);
+          CREATE INDEX IF NOT EXISTS idx_files_source_id ON files(source_id);
+          CREATE INDEX IF NOT EXISTS idx_files_hash ON files(content_hash);
+        `);
+      }
+    },
+  },
+  {
+    version: 40,
+    name: 'pages_emotional_weight',
+    // v0.29 — Salience + Anomaly Detection.
+    //
+    // Adds the `emotional_weight` column to pages. Populated by the new
+    // `recompute_emotional_weight` cycle phase from tags + takes (deterministic;
+    // no LLM). Default 0.0 so freshly imported pages don't pollute salience
+    // ranking before the cycle has run; users run `gbrain dream --phase
+    // recompute_emotional_weight` once after upgrading to backfill.
+    //
+    // No index: the salience query orders by a computed score (emotional_weight,
+    // take_count, recency-decay), not by raw emotional_weight. Add an index
+    // later only if a query orders by the raw column directly.
+    //
+    // Postgres ADD COLUMN with a constant DEFAULT is metadata-only on PG 11+
+    // and PGLite (PG 17.5 via WASM) — instant on tables of any size.
+    sql: `
+      ALTER TABLE pages
+        ADD COLUMN IF NOT EXISTS emotional_weight REAL NOT NULL DEFAULT 0.0;
+    `,
+  },
+  {
+    version: 41,
+    name: 'pages_recency_columns',
+    sql: '',
+    // v0.29.1 — Salience-and-Recency, additive opt-in.
+    //
+    // Four new pages columns (all nullable, additive only, no behavior change
+    // in the default search path; only consulted when a caller opts into
+    // `salience='on'` / `recency='on'` or the new `since`/`until` filter):
+    //
+    //   effective_date         — content date (event_date / date / published /
+    //                            filename-date / fallback). Read by the new
+    //                            recency boost and date-filter paths only.
+    //                            Auto-link doesn't touch it (immune to
+    //                            updated_at churn).
+    //   effective_date_source  — sentinel for the doctor's effective_date_health
+    //                            check ('event_date' | 'date' | 'published' |
+    //                            'filename' | 'fallback'). The 'fallback' value
+    //                            is what surfaces "page that fell back to
+    //                            updated_at when frontmatter was unparseable".
+    //   import_filename        — basename without extension, captured at import.
+    //                            computeEffectiveDate uses it for filename-date
+    //                            precedence (daily/, meetings/ prefixes). Older
+    //                            rows leave it NULL; backfill falls through.
+    //   salience_touched_at    — bumped by recompute_emotional_weight when
+    //                            emotional_weight changes. Salience window
+    //                            uses GREATEST(updated_at, salience_touched_at)
+    //                            so newly-salient old pages enter the recent
+    //                            salience query.
+    //
+    // Plus an expression index used by since/until filters that read
+    // COALESCE(effective_date, updated_at). Partial-index claim from earlier
+    // plan iterations was wrong (codex pass-2 #15) — the planner won't use a
+    // partial index for the negative side of a COALESCE; expression index does.
+    //
+    // CONCURRENTLY + pre-drop guard (mirror of v34) on Postgres; plain CREATE
+    // INDEX on PGLite via the handler branching on engine.kind.
+    handler: async (engine) => {
+      // 1. ADD COLUMN x4. ALTER TABLE ADD COLUMN IF NOT EXISTS is idempotent.
+      //    No defaults, all nullable, all metadata-only on PG 11+ and PGLite.
+      await engine.runMigration(38, `
+        ALTER TABLE pages ADD COLUMN IF NOT EXISTS effective_date        TIMESTAMPTZ;
+        ALTER TABLE pages ADD COLUMN IF NOT EXISTS effective_date_source TEXT;
+        ALTER TABLE pages ADD COLUMN IF NOT EXISTS import_filename       TEXT;
+        ALTER TABLE pages ADD COLUMN IF NOT EXISTS salience_touched_at   TIMESTAMPTZ;
+      `);
+
+      // 2. Expression index for since/until date-range filters.
+      if (engine.kind === 'postgres') {
+        // Pre-drop any invalid index from a prior CONCURRENTLY failure.
+        await engine.runMigration(38, `
+          DO $$ BEGIN
+            IF EXISTS (
+              SELECT 1 FROM pg_index i
+              JOIN pg_class c ON c.oid = i.indexrelid
+              WHERE c.relname = 'pages_coalesce_date_idx' AND NOT i.indisvalid
+            ) THEN
+              EXECUTE 'DROP INDEX CONCURRENTLY IF EXISTS pages_coalesce_date_idx';
+            END IF;
+          END $$;
+        `);
+        await engine.runMigration(38, `
+          CREATE INDEX CONCURRENTLY IF NOT EXISTS pages_coalesce_date_idx
+            ON pages ((COALESCE(effective_date, updated_at)));
+        `);
+      } else {
+        await engine.runMigration(38, `
+          CREATE INDEX IF NOT EXISTS pages_coalesce_date_idx
+            ON pages ((COALESCE(effective_date, updated_at)));
+        `);
+      }
+    },
+    // CONCURRENTLY on Postgres requires no surrounding transaction.
+    transaction: false,
+  },
+  {
+    version: 42,
+    name: 'eval_candidates_recency_capture',
+    // v0.29.1 — capture agent-explicit recency + salience choices for replay
+    // reproducibility (D11 codex resolution).
+    //
+    // Without these fields, `gbrain eval replay` cannot reproduce a captured
+    // run: the live behavior depends on the resolved {salience, recency}
+    // values, which are absent from v0.29.0's eval_candidates schema. Replays
+    // of agent-explicit choices drift the same way as_of_ts replays drifted
+    // before being captured.
+    //
+    // All columns are nullable + additive. Pre-v0.29.1 rows stay valid. The
+    // NDJSON `schema_version` STAYS at 1 — the new fields are optional, and
+    // gbrain-evals consumers that don't know about them ignore them
+    // (standard permissive deserialization). No cross-repo coordination
+    // required (codex pass-1 #C2 dissolved).
+    //
+    //   as_of_ts            — brain's logical NOW at capture (replay uses
+    //                         this instead of wall-clock so old captures
+    //                         reproduce identically against today's brain).
+    //   salience_param      — what the caller passed (or NULL if omitted).
+    //   recency_param       — same for recency.
+    //   salience_resolved   — final value applied ('off' / 'on' / 'strong').
+    //   recency_resolved    — same for recency.
+    //   salience_source     — 'caller' or 'auto_heuristic'.
+    //   recency_source      — same for recency.
+    //
+    // ADD COLUMN with no DEFAULT is metadata-only on PG 11+ and PGLite —
+    // instant on tables of any size.
+    sql: `
+      ALTER TABLE eval_candidates ADD COLUMN IF NOT EXISTS as_of_ts          TIMESTAMPTZ;
+      ALTER TABLE eval_candidates ADD COLUMN IF NOT EXISTS salience_param    TEXT;
+      ALTER TABLE eval_candidates ADD COLUMN IF NOT EXISTS recency_param     TEXT;
+      ALTER TABLE eval_candidates ADD COLUMN IF NOT EXISTS salience_resolved TEXT;
+      ALTER TABLE eval_candidates ADD COLUMN IF NOT EXISTS recency_resolved  TEXT;
+      ALTER TABLE eval_candidates ADD COLUMN IF NOT EXISTS salience_source   TEXT;
+      ALTER TABLE eval_candidates ADD COLUMN IF NOT EXISTS recency_source    TEXT;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

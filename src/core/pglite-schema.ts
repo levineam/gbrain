@@ -3,8 +3,13 @@
  *
  * Differences from Postgres:
  * - No RLS block (no role system in embedded PGLite)
- * - No files table (file attachments require Supabase Storage)
  * - No pg_advisory_lock (single connection)
+ *
+ * As of v0.27.1 the `files` table mirrors the Postgres shape on PGLite —
+ * v0.18 originally omitted it because file attachments required Supabase
+ * Storage, but v0.27.1 multimodal ingestion stores image bytes on disk in
+ * the brain repo and only indexes metadata. Path-referenced binary asset
+ * tracking works fine on PGLite. Migration v36 adds it for existing brains.
  *
  * Includes OAuth tables (oauth_clients, oauth_tokens, oauth_codes) and
  * auth infrastructure (access_tokens, mcp_request_log) because
@@ -58,16 +63,24 @@ CREATE TABLE IF NOT EXISTS pages (
   type          TEXT    NOT NULL,
   -- v0.19.0: markdown vs code distinction at the DB level.
   page_kind     TEXT    NOT NULL DEFAULT 'markdown'
-                CHECK (page_kind IN ('markdown','code')),
+                CHECK (page_kind IN ('markdown','code','image')),
   title         TEXT    NOT NULL,
   compiled_truth TEXT   NOT NULL DEFAULT '',
   timeline      TEXT    NOT NULL DEFAULT '',
   frontmatter   JSONB   NOT NULL DEFAULT '{}',
   content_hash  TEXT,
+  -- v0.29: deterministic 0..1 score (tag emotion + take density + user-as-holder ratio).
+  -- Populated by the recompute_emotional_weight cycle phase.
+  emotional_weight REAL NOT NULL DEFAULT 0.0,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   -- v0.26.5: soft-delete + recovery window (mirrors src/schema.sql).
   deleted_at    TIMESTAMPTZ,
+  -- v0.29.1: salience-and-recency, additive opt-in (mirrors src/schema.sql).
+  effective_date        TIMESTAMPTZ,
+  effective_date_source TEXT,
+  import_filename       TEXT,
+  salience_touched_at   TIMESTAMPTZ,
   CONSTRAINT pages_source_slug_key UNIQUE (source_id, slug)
 );
 
@@ -78,32 +91,45 @@ CREATE INDEX IF NOT EXISTS idx_pages_source_id ON pages(source_id);
 -- v0.26.5: partial index supports the autopilot purge sweep (mirrors src/schema.sql).
 CREATE INDEX IF NOT EXISTS pages_deleted_at_purge_idx
   ON pages (deleted_at) WHERE deleted_at IS NOT NULL;
+-- v0.29.1: expression index for since/until date-range filters.
+CREATE INDEX IF NOT EXISTS pages_coalesce_date_idx
+  ON pages ((COALESCE(effective_date, updated_at)));
 
 -- ============================================================
 -- content_chunks: chunked content with embeddings
 -- ============================================================
 CREATE TABLE IF NOT EXISTS content_chunks (
-  id            SERIAL PRIMARY KEY,
-  page_id       INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
-  chunk_index   INTEGER NOT NULL,
-  chunk_text    TEXT    NOT NULL,
-  chunk_source  TEXT    NOT NULL DEFAULT 'compiled_truth',
-  embedding     vector(__EMBEDDING_DIMS__),
-  model         TEXT    NOT NULL DEFAULT '__EMBEDDING_MODEL__',
-  token_count   INTEGER,
-  embedded_at   TIMESTAMPTZ,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  id              SERIAL PRIMARY KEY,
+  page_id         INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+  chunk_index     INTEGER NOT NULL,
+  chunk_text      TEXT    NOT NULL,
+  chunk_source    TEXT    NOT NULL DEFAULT 'compiled_truth',
+  embedding       vector(__EMBEDDING_DIMS__),
+  model           TEXT    NOT NULL DEFAULT '__EMBEDDING_MODEL__',
+  token_count     INTEGER,
+  embedded_at     TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   -- v0.19.0: code chunk metadata (markdown chunks leave NULL).
-  language      TEXT,
-  symbol_name   TEXT,
-  symbol_type   TEXT,
-  start_line    INTEGER,
-  end_line      INTEGER
+  language        TEXT,
+  symbol_name     TEXT,
+  symbol_type     TEXT,
+  start_line      INTEGER,
+  end_line        INTEGER,
+  -- v0.27.1 multimodal. modality discriminates text vs image rows; image
+  -- chunks carry their 1024-dim Voyage multimodal vector in embedding_image
+  -- (independent of the brain primary embedding column dim).
+  modality        TEXT NOT NULL DEFAULT 'text',
+  embedding_image vector(1024)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_page_index ON content_chunks(page_id, chunk_index);
 CREATE INDEX IF NOT EXISTS idx_chunks_page ON content_chunks(page_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON content_chunks USING hnsw (embedding vector_cosine_ops);
+-- v0.27.1: partial HNSW for multimodal images. Footprint stays proportional
+-- to image-chunk count, not table size.
+CREATE INDEX IF NOT EXISTS idx_chunks_embedding_image
+  ON content_chunks USING hnsw (embedding_image vector_cosine_ops)
+  WHERE embedding_image IS NOT NULL;
 -- v0.19.0: partial indexes for code chunk lookups.
 CREATE INDEX IF NOT EXISTS idx_chunks_symbol_name ON content_chunks(symbol_name) WHERE symbol_name IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_chunks_language ON content_chunks(language) WHERE language IS NOT NULL;
@@ -159,6 +185,33 @@ CREATE TABLE IF NOT EXISTS raw_data (
 );
 
 CREATE INDEX IF NOT EXISTS idx_raw_data_page ON raw_data(page_id);
+
+-- ============================================================
+-- files: binary asset metadata (v0.27.1 — PGLite parity for multimodal)
+-- Image bytes never enter the DB; storage_path references a path in the
+-- brain repo. Identity is (source_id, storage_path) via the UNIQUE
+-- constraint on storage_path; upserts replace metadata in place.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS files (
+  id           SERIAL PRIMARY KEY,
+  source_id    TEXT   NOT NULL DEFAULT 'default'
+               REFERENCES sources(id) ON DELETE CASCADE,
+  page_slug    TEXT,
+  page_id      INTEGER REFERENCES pages(id) ON DELETE SET NULL,
+  filename     TEXT   NOT NULL,
+  storage_path TEXT   NOT NULL,
+  mime_type    TEXT,
+  size_bytes   BIGINT,
+  content_hash TEXT   NOT NULL,
+  metadata     JSONB  NOT NULL DEFAULT '{}',
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(storage_path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_files_page ON files(page_slug);
+CREATE INDEX IF NOT EXISTS idx_files_page_id ON files(page_id);
+CREATE INDEX IF NOT EXISTS idx_files_source_id ON files(source_id);
+CREATE INDEX IF NOT EXISTS idx_files_hash ON files(content_hash);
 
 -- ============================================================
 -- timeline_entries: structured timeline
@@ -402,7 +455,15 @@ CREATE TABLE IF NOT EXISTS eval_candidates (
   remote                BOOLEAN      NOT NULL,
   job_id                INTEGER,
   subagent_id           INTEGER,
-  created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+  created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  -- v0.29.1 — agent-explicit recency + salience capture for replay (mirrors src/schema.sql).
+  as_of_ts              TIMESTAMPTZ,
+  salience_param        TEXT,
+  recency_param         TEXT,
+  salience_resolved     TEXT,
+  recency_resolved      TEXT,
+  salience_source       TEXT,
+  recency_source        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_eval_candidates_created_at ON eval_candidates(created_at DESC);
 

@@ -7,6 +7,7 @@ import type {
   LinkBatchInput, TimelineBatchInput,
   ReservedConnection,
   DreamVerdict, DreamVerdictInput,
+  FileSpec, FileRow,
   TakeBatchInput, Take, TakesListOpts, TakeHit, StaleTakeRow,
   TakeResolution, SynthesisEvidenceInput,
 } from './engine.ts';
@@ -27,11 +28,14 @@ import type {
   EngineConfig,
   EvalCandidate, EvalCandidateInput,
   EvalCaptureFailure, EvalCaptureFailureReason,
+  SalienceOpts, SalienceResult, AnomaliesOpts, AnomalyResult,
+  EmotionalWeightInputRow, EmotionalWeightWriteRow,
 } from './types.ts';
 import { validateSlug, contentHash, rowToPage, rowToChunk, rowToSearchResult, takeRowToTake } from './utils.ts';
-import { GBrainError } from './types.ts';
+import { GBrainError, PAGE_SORT_SQL } from './types.ts';
+import { computeAnomaliesFromBuckets } from './cycle/anomaly.ts';
 import { resolveBoostMap, resolveHardExcludes } from './search/source-boost.ts';
-import { buildSourceFactorCase, buildHardExcludeClause, buildVisibilityClause } from './search/sql-ranking.ts';
+import { buildSourceFactorCase, buildHardExcludeClause, buildVisibilityClause, buildRecencyComponentSql } from './search/sql-ranking.ts';
 
 type PGLiteDB = PGlite;
 
@@ -263,6 +267,8 @@ export class PGLiteEngine implements BrainEngine {
                 WHERE table_schema='public' AND table_name='content_chunks' AND column_name='language') AS language_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema='public' AND table_name='content_chunks' AND column_name='search_vector') AS search_vector_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='content_chunks' AND column_name='embedding_image') AS embedding_image_exists,
         EXISTS (SELECT 1 FROM information_schema.tables
                 WHERE table_schema='public' AND table_name='mcp_request_log') AS mcp_log_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
@@ -283,6 +289,7 @@ export class PGLiteEngine implements BrainEngine {
       symbol_name_exists: boolean;
       language_exists: boolean;
       search_vector_exists: boolean;
+      embedding_image_exists: boolean;
       mcp_log_exists: boolean;
       agent_name_exists: boolean;
       subagent_messages_exists: boolean;
@@ -295,6 +302,8 @@ export class PGLiteEngine implements BrainEngine {
     const needsChunksBootstrap = probe.chunks_exists
       && (!probe.symbol_name_exists || !probe.language_exists || !probe.search_vector_exists);
     const needsPagesDeletedAt = probe.pages_exists && !probe.deleted_at_exists;
+    // v0.27.1 — partial HNSW idx_chunks_embedding_image references this column.
+    const needsChunksEmbeddingImage = probe.chunks_exists && !probe.embedding_image_exists;
     // v0.26.3 (v33): idx_mcp_log_agent_time in PGLITE_SCHEMA_SQL needs agent_name col.
     const needsMcpLogBootstrap = probe.mcp_log_exists && !probe.agent_name_exists;
     // v0.27 (v36): idx_subagent_messages_provider in PGLITE_SCHEMA_SQL needs
@@ -302,7 +311,9 @@ export class PGLiteEngine implements BrainEngine {
     const needsSubagentProviderId = probe.subagent_messages_exists && !probe.subagent_provider_id_exists;
 
     // Fresh installs (no tables yet) and modern brains both no-op.
-    if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap && !needsPagesDeletedAt && !needsMcpLogBootstrap && !needsSubagentProviderId) return;
+    if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
+        && !needsPagesDeletedAt && !needsChunksEmbeddingImage
+        && !needsMcpLogBootstrap && !needsSubagentProviderId) return;
 
     console.log('  Pre-v0.21 brain detected, applying forward-reference bootstrap');
 
@@ -363,6 +374,18 @@ export class PGLiteEngine implements BrainEngine {
       // not to crash. v34 runs later via runMigrations and is idempotent.
       await this.db.exec(`
         ALTER TABLE pages ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+      `);
+    }
+
+    if (needsChunksEmbeddingImage) {
+      // v39 (multimodal_dual_column_v0_27_1) adds modality + embedding_image
+      // columns to content_chunks plus the partial HNSW index that references
+      // the column. Bootstrap mirrors enough for PGLITE_SCHEMA_SQL's
+      // `CREATE INDEX idx_chunks_embedding_image ... WHERE embedding_image IS NOT NULL`
+      // not to crash. v39 runs later via runMigrations and is idempotent.
+      await this.db.exec(`
+        ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS modality TEXT NOT NULL DEFAULT 'text';
+        ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS embedding_image vector(1024);
       `);
     }
 
@@ -441,15 +464,20 @@ export class PGLiteEngine implements BrainEngine {
     const hash = page.content_hash || contentHash(page);
     const frontmatter = page.frontmatter || {};
 
-    // v0.18.0 Step 2: source_id relies on the schema DEFAULT 'default' so
-    // existing callers still target the default source without threading
-    // a parameter. ON CONFLICT target becomes (source_id, slug) since the
-    // global UNIQUE(slug) was dropped in migration v17. Step 5+ will
-    // surface an explicit sourceId param on putPage for multi-source sync.
+    // v0.18.0 Step 2: source_id relies on the schema DEFAULT 'default'.
+    // ON CONFLICT target is (source_id, slug); global UNIQUE(slug) dropped in v17.
     const pageKind = page.page_kind || 'markdown';
+    // v0.29.1 — additive opt-in columns. COALESCE(EXCLUDED.x, pages.x)
+    // preserves existing values when caller omits them (auto-link path,
+    // code reindex, etc.). Mirrors postgres-engine.ts.
+    const effectiveDate = page.effective_date instanceof Date
+      ? page.effective_date.toISOString()
+      : (page.effective_date ?? null);
+    const effectiveDateSource = page.effective_date_source ?? null;
+    const importFilename = page.import_filename ?? null;
     const { rows } = await this.db.query(
-      `INSERT INTO pages (slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, now())
+      `INSERT INTO pages (slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at, effective_date, effective_date_source, import_filename)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, now(), $9::timestamptz, $10, $11)
        ON CONFLICT (source_id, slug) DO UPDATE SET
          type = EXCLUDED.type,
          page_kind = EXCLUDED.page_kind,
@@ -458,9 +486,12 @@ export class PGLiteEngine implements BrainEngine {
          timeline = EXCLUDED.timeline,
          frontmatter = EXCLUDED.frontmatter,
          content_hash = EXCLUDED.content_hash,
-         updated_at = now()
-       RETURNING id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at`,
-      [slug, page.type, pageKind, page.title, page.compiled_truth, page.timeline || '', JSON.stringify(frontmatter), hash]
+         updated_at = now(),
+         effective_date        = COALESCE(EXCLUDED.effective_date,        pages.effective_date),
+         effective_date_source = COALESCE(EXCLUDED.effective_date_source, pages.effective_date_source),
+         import_filename       = COALESCE(EXCLUDED.import_filename,       pages.import_filename)
+       RETURNING id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename`,
+      [slug, page.type, pageKind, page.title, page.compiled_truth, page.timeline || '', JSON.stringify(frontmatter), hash, effectiveDate, effectiveDateSource, importFilename]
     );
     return rowToPage(rows[0] as Record<string, unknown>);
   }
@@ -553,9 +584,13 @@ export class PGLiteEngine implements BrainEngine {
     params.push(limit, offset);
     const limitSql = `LIMIT $${params.length - 1} OFFSET $${params.length}`;
 
+    // v0.29: ORDER BY threading via PAGE_SORT_SQL whitelist (no SQL injection).
+    const sortKey = filters?.sort && PAGE_SORT_SQL[filters.sort] ? filters.sort : 'updated_desc';
+    const orderBy = PAGE_SORT_SQL[sortKey];
+
     const { rows } = await this.db.query(
       `SELECT p.* FROM pages p ${tagJoin} ${whereSql}
-       ORDER BY p.updated_at DESC ${limitSql}`,
+       ORDER BY ${orderBy} ${limitSql}`,
       params
     );
 
@@ -627,6 +662,18 @@ export class PGLiteEngine implements BrainEngine {
       params.push(opts.symbolKind);
       extraFilter += ` AND cc.symbol_type = $${params.length}`;
     }
+    // v0.29.1 — since/until date filter (Postgres parity, codex pass-1 #10).
+    // Reads against COALESCE(effective_date, updated_at) so date filtering
+    // matches user intent (a meeting was on its event_date, not when it
+    // got reimported). Same param shape as Postgres engine.
+    if (opts?.afterDate) {
+      params.push(opts.afterDate);
+      extraFilter += ` AND COALESCE(p.effective_date, p.updated_at, p.created_at) > $${params.length}::timestamptz`;
+    }
+    if (opts?.beforeDate) {
+      params.push(opts.beforeDate);
+      extraFilter += ` AND COALESCE(p.effective_date, p.updated_at, p.created_at) < $${params.length}::timestamptz`;
+    }
 
     // v0.26.5: visibility filter (soft-deleted + archived-source).
     const visibilityClause = buildVisibilityClause('p', 's');
@@ -644,6 +691,10 @@ export class PGLiteEngine implements BrainEngine {
          JOIN pages p ON p.id = cc.page_id
          JOIN sources s ON s.id = p.source_id
          WHERE cc.search_vector @@ websearch_to_tsquery('english', $1) ${detailFilter}${extraFilter} ${hardExcludeClause} ${visibilityClause}
+           -- v0.27.1: hide image rows from default text-keyword search so
+           -- OCR text doesn't drown text-page hits. Image-similarity queries
+           -- run a separate vector path on embedding_image.
+           AND cc.modality = 'text'
          ORDER BY score DESC
          LIMIT $2
        ),
@@ -698,6 +749,15 @@ export class PGLiteEngine implements BrainEngine {
     if (opts?.symbolKind) {
       params.push(opts.symbolKind);
       extraFilter += ` AND cc.symbol_type = $${params.length}`;
+    }
+    // v0.29.1 since/until parity (codex pass-1 #10).
+    if (opts?.afterDate) {
+      params.push(opts.afterDate);
+      extraFilter += ` AND COALESCE(p.effective_date, p.updated_at, p.created_at) > $${params.length}::timestamptz`;
+    }
+    if (opts?.beforeDate) {
+      params.push(opts.beforeDate);
+      extraFilter += ` AND COALESCE(p.effective_date, p.updated_at, p.created_at) < $${params.length}::timestamptz`;
     }
 
     // v0.26.5: visibility filter for the chunk-grain anchor primitive.
@@ -759,22 +819,43 @@ export class PGLiteEngine implements BrainEngine {
       params.push(opts.symbolKind);
       extraFilter += ` AND cc.symbol_type = $${params.length}`;
     }
+    // v0.29.1 since/until parity (codex pass-1 #10). Filter applied INSIDE
+    // the inner CTE so HNSW's candidate pool already excludes out-of-range
+    // pages — preserves pagination contract.
+    if (opts?.afterDate) {
+      params.push(opts.afterDate);
+      extraFilter += ` AND COALESCE(p.effective_date, p.updated_at, p.created_at) > $${params.length}::timestamptz`;
+    }
+    if (opts?.beforeDate) {
+      params.push(opts.beforeDate);
+      extraFilter += ` AND COALESCE(p.effective_date, p.updated_at, p.created_at) < $${params.length}::timestamptz`;
+    }
 
     // v0.26.5: visibility filter applied in the inner CTE so HNSW sees the
     // same candidate count it always did. See postgres-engine.ts for rationale.
     const visibilityClause = buildVisibilityClause('p', 's');
+
+    // v0.27.1: column routing. Default 'embedding' targets the brain's
+    // primary text-embedding column; 'embedding_image' targets the
+    // multimodal column populated by importImageFile. Image-similarity
+    // queries pass embeddingColumn='embedding_image' AND a 1024-dim vector
+    // produced by gateway.embedMultimodal — must match the column dim.
+    const col = opts?.embeddingColumn === 'embedding_image' ? 'embedding_image' : 'embedding';
+    // Image rows live in modality='image'; text/code in 'text'. Restrict
+    // to the modality matching the column to avoid cross-mode dim leaks.
+    const modalityFilter = col === 'embedding_image' ? `AND cc.modality = 'image'` : `AND cc.modality = 'text'`;
 
     const { rows } = await this.db.query(
       `WITH hnsw_candidates AS (
          SELECT
            p.slug, p.id as page_id, p.title, p.type, p.source_id, p.updated_at,
            cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-           1 - (cc.embedding <=> $1::vector) AS raw_score
+           1 - (cc.${col} <=> $1::vector) AS raw_score
          FROM content_chunks cc
          JOIN pages p ON p.id = cc.page_id
          JOIN sources s ON s.id = p.source_id
-         WHERE cc.embedding IS NOT NULL ${detailFilter}${extraFilter} ${hardExcludeClause} ${visibilityClause}
-         ORDER BY cc.embedding <=> $1::vector
+         WHERE cc.${col} IS NOT NULL ${modalityFilter} ${detailFilter}${extraFilter} ${hardExcludeClause} ${visibilityClause}
+         ORDER BY cc.${col} <=> $1::vector
          LIMIT $2
        )
        SELECT
@@ -839,7 +920,11 @@ export class PGLiteEngine implements BrainEngine {
     // v0.20.0 Cathedral II Layer 6: adds parent_symbol_path / doc_comment /
     // symbol_name_qualified so nested-chunk emission (A3) and eventual A1
     // edge resolution can round-trip metadata through upserts.
-    const cols = '(page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at, language, symbol_name, symbol_type, start_line, end_line, parent_symbol_path, doc_comment, symbol_name_qualified)';
+    // v0.27.1 (Phase 8): added `modality` + `embedding_image` to the column
+    // list. Image chunks pass embedding=null + embedding_image=Float32Array
+    // (1024-dim Voyage). Text/code chunks pass embedding=Float32Array +
+    // embedding_image=null. Default modality='text' when omitted.
+    const cols = '(page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at, language, symbol_name, symbol_type, start_line, end_line, parent_symbol_path, doc_comment, symbol_name_qualified, modality, embedding_image)';
     const rowParts: string[] = [];
     const params: unknown[] = [];
     let paramIdx = 1;
@@ -848,29 +933,40 @@ export class PGLiteEngine implements BrainEngine {
       const embeddingStr = chunk.embedding
         ? '[' + Array.from(chunk.embedding).join(',') + ']'
         : null;
+      const embeddingImageStr = chunk.embedding_image
+        ? '[' + Array.from(chunk.embedding_image).join(',') + ']'
+        : null;
       const parentPath = chunk.parent_symbol_path && chunk.parent_symbol_path.length > 0
         ? chunk.parent_symbol_path
         : null;
+      const modality = chunk.modality ?? 'text';
 
-      if (embeddingStr) {
-        rowParts.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::vector, $${paramIdx++}, $${paramIdx++}, now(), $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::text[], $${paramIdx++}, $${paramIdx++})`);
-        params.push(
-          pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source,
-          embeddingStr, chunk.model || 'text-embedding-3-large', chunk.token_count || null,
-          chunk.language || null, chunk.symbol_name || null, chunk.symbol_type || null,
-          chunk.start_line ?? null, chunk.end_line ?? null,
-          parentPath, chunk.doc_comment || null, chunk.symbol_name_qualified || null,
-        );
-      } else {
-        rowParts.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::text[], $${paramIdx++}, $${paramIdx++})`);
-        params.push(
-          pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source,
-          chunk.model || 'text-embedding-3-large', chunk.token_count || null,
-          chunk.language || null, chunk.symbol_name || null, chunk.symbol_type || null,
-          chunk.start_line ?? null, chunk.end_line ?? null,
-          parentPath, chunk.doc_comment || null, chunk.symbol_name_qualified || null,
-        );
-      }
+      // Inline ::vector NULL literals to avoid a per-branch placeholder.
+      const embeddingPh = embeddingStr ? `$${paramIdx++}::vector` : 'NULL';
+      const embeddedAtPh = embeddingStr ? 'now()' : 'NULL';
+      const embeddingImagePh = embeddingImageStr ? `$${paramIdx++}::vector` : 'NULL';
+
+      rowParts.push(
+        `($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, ` +
+        `${embeddingPh}, $${paramIdx++}, $${paramIdx++}, ${embeddedAtPh}, ` +
+        `$${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, ` +
+        `$${paramIdx++}::text[], $${paramIdx++}, $${paramIdx++}, ` +
+        `$${paramIdx++}, ${embeddingImagePh})`,
+      );
+
+      // Param push order MUST match placeholder allocation order. Both
+      // embedding placeholders (when present) are allocated BEFORE the
+      // bulk row placeholders, so their values must be pushed first.
+      if (embeddingStr) params.push(embeddingStr);
+      if (embeddingImageStr) params.push(embeddingImageStr);
+      params.push(
+        pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source,
+        chunk.model || 'text-embedding-3-large', chunk.token_count || null,
+        chunk.language || null, chunk.symbol_name || null, chunk.symbol_type || null,
+        chunk.start_line ?? null, chunk.end_line ?? null,
+        parentPath, chunk.doc_comment || null, chunk.symbol_name_qualified || null,
+        modality,
+      );
     }
 
     // CONSISTENCY: when chunk_text changes and no new embedding is supplied, BOTH embedding AND
@@ -895,7 +991,9 @@ export class PGLiteEngine implements BrainEngine {
          end_line = EXCLUDED.end_line,
          parent_symbol_path = EXCLUDED.parent_symbol_path,
          doc_comment = EXCLUDED.doc_comment,
-         symbol_name_qualified = EXCLUDED.symbol_name_qualified`,
+         symbol_name_qualified = EXCLUDED.symbol_name_qualified,
+         modality = EXCLUDED.modality,
+         embedding_image = COALESCE(EXCLUDED.embedding_image, content_chunks.embedding_image)`,
       params
     );
   }
@@ -1263,6 +1361,58 @@ export class PGLiteEngine implements BrainEngine {
     return result;
   }
 
+  async getPageTimestamps(slugs: string[]): Promise<Map<string, Date>> {
+    if (slugs.length === 0) return new Map();
+    const { rows } = await this.db.query(
+      `SELECT slug, COALESCE(updated_at, created_at) as ts
+       FROM pages WHERE slug = ANY($1::text[])`,
+      [slugs]
+    );
+    return new Map(rows.map((r: any) => [r.slug as string, new Date(r.ts as string)]));
+  }
+
+  async getEffectiveDates(refs: Array<{slug: string; source_id: string}>): Promise<Map<string, Date>> {
+    if (refs.length === 0) return new Map();
+    const slugs = refs.map(r => r.slug);
+    const sourceIds = refs.map(r => r.source_id);
+    const { rows } = await this.db.query(
+      `SELECT p.slug, p.source_id, COALESCE(p.effective_date, p.updated_at, p.created_at) AS ts
+         FROM pages p
+         JOIN unnest($1::text[], $2::text[]) AS u(slug, source_id)
+           ON p.slug = u.slug AND p.source_id = u.source_id`,
+      [slugs, sourceIds],
+    );
+    const out = new Map<string, Date>();
+    for (const r of rows as Array<{slug: string; source_id: string; ts: string | Date}>) {
+      const key = `${r.source_id}::${r.slug}`;
+      out.set(key, r.ts instanceof Date ? r.ts : new Date(r.ts));
+    }
+    return out;
+  }
+
+  async getSalienceScores(refs: Array<{slug: string; source_id: string}>): Promise<Map<string, number>> {
+    if (refs.length === 0) return new Map();
+    const slugs = refs.map(r => r.slug);
+    const sourceIds = refs.map(r => r.source_id);
+    const { rows } = await this.db.query(
+      `SELECT p.slug, p.source_id,
+              (COALESCE(p.emotional_weight, 0) * 5
+               + ln(1 + COUNT(DISTINCT t.id))) AS score
+         FROM pages p
+         JOIN unnest($1::text[], $2::text[]) AS u(slug, source_id)
+           ON p.slug = u.slug AND p.source_id = u.source_id
+         LEFT JOIN takes t ON t.page_id = p.id AND t.active = TRUE
+        GROUP BY p.id`,
+      [slugs, sourceIds],
+    );
+    const out = new Map<string, number>();
+    for (const r of rows as Array<{slug: string; source_id: string; score: number | string}>) {
+      const key = `${r.source_id}::${r.slug}`;
+      out.set(key, Number(r.score));
+    }
+    return out;
+  }
+
   async findOrphanPages(): Promise<Array<{ slug: string; title: string; domain: string | null }>> {
     const { rows } = await this.db.query(
       `SELECT
@@ -1415,6 +1565,61 @@ export class PGLiteEngine implements BrainEngine {
       );
     }
     return result.rows as unknown as RawData[];
+  }
+
+  // Files (v0.27.1): see PostgresEngine.upsertFile for the same contract.
+  async upsertFile(spec: FileSpec): Promise<{ id: number; created: boolean }> {
+    const sourceId = spec.source_id ?? 'default';
+    const result = await this.db.query<{ id: number; created: boolean }>(
+      `INSERT INTO files (source_id, page_slug, page_id, filename, storage_path, mime_type, size_bytes, content_hash, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+       ON CONFLICT (storage_path) DO UPDATE SET
+         page_slug = EXCLUDED.page_slug,
+         page_id = EXCLUDED.page_id,
+         filename = EXCLUDED.filename,
+         mime_type = EXCLUDED.mime_type,
+         size_bytes = EXCLUDED.size_bytes,
+         content_hash = EXCLUDED.content_hash,
+         metadata = EXCLUDED.metadata
+       RETURNING id, (xmax = 0) AS created`,
+      [
+        sourceId,
+        spec.page_slug ?? null,
+        spec.page_id ?? null,
+        spec.filename,
+        spec.storage_path,
+        spec.mime_type ?? null,
+        spec.size_bytes ?? null,
+        spec.content_hash,
+        JSON.stringify(spec.metadata ?? {}),
+      ]
+    );
+    if (result.rows.length === 0) {
+      throw new Error(`upsertFile returned no rows for ${spec.storage_path}`);
+    }
+    return { id: result.rows[0].id, created: !!result.rows[0].created };
+  }
+
+  async getFile(sourceId: string, storagePath: string): Promise<FileRow | null> {
+    const result = await this.db.query<FileRow>(
+      `SELECT id, source_id, page_slug, page_id, filename, storage_path, mime_type, size_bytes, content_hash, metadata, created_at
+       FROM files
+       WHERE source_id = $1 AND storage_path = $2
+       LIMIT 1`,
+      [sourceId, storagePath]
+    );
+    return result.rows.length > 0 ? (result.rows[0] as FileRow) : null;
+  }
+
+  async listFilesForPage(pageId: number): Promise<FileRow[]> {
+    const result = await this.db.query<FileRow>(
+      `SELECT id, source_id, page_slug, page_id, filename, storage_path, mime_type, size_bytes, content_hash, metadata, created_at
+       FROM files
+       WHERE page_id = $1
+       ORDER BY created_at ASC`,
+      [pageId]
+    );
+    return result.rows as FileRow[];
   }
 
   // Dream-cycle significance verdict cache (v0.23).
@@ -2207,6 +2412,240 @@ export class PGLiteEngine implements BrainEngine {
       [since]
     );
     return rows as unknown as EvalCaptureFailure[];
+  }
+
+  // ============================================================
+  // v0.29 — Salience + Anomaly Detection
+  // ============================================================
+
+  async batchLoadEmotionalInputs(slugs?: string[]): Promise<EmotionalWeightInputRow[]> {
+    // Two CTEs avoid the N×M cartesian product (codex C4#4).
+    const baseSql = `
+      WITH page_tags AS (
+        SELECT page_id, array_agg(DISTINCT tag) AS tags
+          FROM tags GROUP BY page_id
+      ),
+      page_takes AS (
+        SELECT page_id, json_agg(json_build_object(
+                 'holder', holder, 'weight', weight, 'kind', kind, 'active', active
+               )) AS takes
+          FROM takes WHERE active = TRUE GROUP BY page_id
+      )
+      SELECT p.slug, p.source_id,
+             COALESCE(pt.tags, ARRAY[]::text[]) AS tags,
+             COALESCE(pk.takes, '[]'::json) AS takes
+        FROM pages p
+        LEFT JOIN page_tags pt  ON pt.page_id = p.id
+        LEFT JOIN page_takes pk ON pk.page_id = p.id
+    `;
+    const { rows } = slugs
+      ? await this.db.query(`${baseSql} WHERE p.slug = ANY($1::text[])`, [slugs])
+      : await this.db.query(baseSql);
+    return (rows as Record<string, unknown>[]).map(r => ({
+      slug: String(r.slug),
+      source_id: String(r.source_id),
+      tags: (r.tags as string[]) ?? [],
+      takes: (r.takes as EmotionalWeightInputRow['takes']) ?? [],
+    }));
+  }
+
+  async setEmotionalWeightBatch(rows: EmotionalWeightWriteRow[]): Promise<number> {
+    if (rows.length === 0) return 0;
+    const slugs = rows.map(r => r.slug);
+    const sourceIds = rows.map(r => r.source_id);
+    const weights = rows.map(r => r.weight);
+    // Composite-keyed UPDATE FROM unnest (codex C4#3).
+    // v0.29.1: bump salience_touched_at when emotional_weight actually changes
+    // so the salience query window picks up newly-salient old pages. Mirror
+    // of postgres-engine.ts.
+    const result = await this.db.query(
+      `UPDATE pages
+          SET emotional_weight = u.weight,
+              salience_touched_at = CASE
+                WHEN pages.emotional_weight IS DISTINCT FROM u.weight THEN now()
+                ELSE pages.salience_touched_at
+              END
+         FROM unnest($1::text[], $2::text[], $3::real[])
+           AS u(slug, source_id, weight)
+        WHERE pages.slug = u.slug AND pages.source_id = u.source_id
+        RETURNING 1`,
+      [slugs, sourceIds, weights]
+    );
+    return result.rows.length;
+  }
+
+  async getRecentSalience(opts: SalienceOpts): Promise<SalienceResult[]> {
+    const days = Math.max(0, opts.days ?? 14);
+    const limit = clampSearchLimit(opts.limit, 20, 100);
+    const slugPrefix = opts.slugPrefix;
+    const boundaryIso = new Date(Date.now() - days * 86400000).toISOString();
+
+    const params: unknown[] = [boundaryIso];
+    let prefixCondition = '';
+    if (slugPrefix) {
+      const escaped = slugPrefix.replace(/[\\%_]/g, (c) => '\\' + c) + '%';
+      params.push(escaped);
+      prefixCondition = `AND p.slug LIKE $${params.length} ESCAPE '\\'`;
+    }
+    params.push(limit);
+    const limitParam = `$${params.length}`;
+
+    // v0.29.1: third score term via buildRecencyComponentSql. Default
+    // 'flat' = v0.29.0 behavior. 'on' opts into per-prefix decay.
+    const recencyBias = opts.recency_bias ?? 'flat';
+    let recencySql: string;
+    if (recencyBias === 'on') {
+      const { resolveRecencyDecayMap, DEFAULT_FALLBACK } = await import('./search/recency-decay.ts');
+      recencySql = buildRecencyComponentSql({
+        slugColumn: 'p.slug',
+        dateExpr: 'COALESCE(p.effective_date, p.updated_at)',
+        decayMap: resolveRecencyDecayMap(),
+        fallback: DEFAULT_FALLBACK,
+      });
+    } else {
+      recencySql = buildRecencyComponentSql({
+        slugColumn: 'p.slug',
+        dateExpr: 'p.updated_at',
+        decayMap: {},
+        fallback: { halflifeDays: 1, coefficient: 1.0 },
+      });
+    }
+    const { rows } = await this.db.query(
+      `SELECT p.slug, p.source_id, p.title, p.type, p.updated_at, p.emotional_weight,
+              COUNT(DISTINCT t.id) AS take_count,
+              COALESCE(AVG(t.weight), 0) AS take_avg_weight,
+              (p.emotional_weight * 5)
+                + ln(1 + COUNT(DISTINCT t.id))
+                + ${recencySql}
+                AS score
+         FROM pages p
+         LEFT JOIN takes t ON t.page_id = p.id AND t.active = TRUE
+        WHERE GREATEST(p.updated_at, COALESCE(p.salience_touched_at, p.updated_at)) >= $1::timestamptz
+          ${prefixCondition}
+        GROUP BY p.id
+        ORDER BY score DESC
+        LIMIT ${limitParam}`,
+      params
+    );
+    return (rows as Record<string, unknown>[]).map(r => ({
+      slug: String(r.slug),
+      source_id: String(r.source_id),
+      title: String(r.title ?? ''),
+      type: r.type as SalienceResult['type'],
+      updated_at: r.updated_at as Date,
+      emotional_weight: Number(r.emotional_weight ?? 0),
+      take_count: Number(r.take_count ?? 0),
+      take_avg_weight: Number(r.take_avg_weight ?? 0),
+      score: Number(r.score ?? 0),
+    }));
+  }
+
+  async findAnomalies(opts: AnomaliesOpts): Promise<AnomalyResult[]> {
+    const sigma = opts.sigma ?? 3.0;
+    const lookbackDays = Math.max(1, opts.lookback_days ?? 30);
+    const sinceIso = (opts.since ?? new Date().toISOString().slice(0, 10));
+    const sinceDate = new Date(sinceIso + 'T00:00:00Z');
+    const sinceEnd = new Date(sinceDate.getTime() + 86400000);
+    const baselineStart = new Date(sinceDate.getTime() - lookbackDays * 86400000);
+
+    const tagBaselineRes = await this.db.query(
+      `WITH days AS (
+         SELECT day::date FROM generate_series(
+           $1::date, $2::date - 1, '1 day'::interval
+         ) AS day
+       ),
+       cohort_keys AS (
+         SELECT DISTINCT t.tag FROM tags t JOIN pages p ON p.id = t.page_id
+          WHERE p.updated_at >= $1::timestamptz AND p.updated_at < $2::timestamptz
+       ),
+       touched AS (
+         SELECT t.tag,
+                date_trunc('day', p.updated_at)::date AS day,
+                COUNT(DISTINCT p.id) AS cnt
+           FROM tags t JOIN pages p ON p.id = t.page_id
+          WHERE p.updated_at >= $1::timestamptz AND p.updated_at < $2::timestamptz
+          GROUP BY 1, 2
+       )
+       SELECT cd.tag AS cohort_value, d.day::text AS day, COALESCE(t.cnt, 0)::int AS count
+         FROM cohort_keys cd CROSS JOIN days d
+         LEFT JOIN touched t ON t.tag = cd.tag AND t.day = d.day`,
+      [baselineStart.toISOString(), sinceDate.toISOString()]
+    );
+
+    const typeBaselineRes = await this.db.query(
+      `WITH days AS (
+         SELECT day::date FROM generate_series(
+           $1::date, $2::date - 1, '1 day'::interval
+         ) AS day
+       ),
+       cohort_keys AS (
+         SELECT DISTINCT p.type FROM pages p
+          WHERE p.updated_at >= $1::timestamptz AND p.updated_at < $2::timestamptz
+       ),
+       touched AS (
+         SELECT p.type,
+                date_trunc('day', p.updated_at)::date AS day,
+                COUNT(DISTINCT p.id) AS cnt
+           FROM pages p
+          WHERE p.updated_at >= $1::timestamptz AND p.updated_at < $2::timestamptz
+          GROUP BY 1, 2
+       )
+       SELECT cd.type AS cohort_value, d.day::text AS day, COALESCE(t.cnt, 0)::int AS count
+         FROM cohort_keys cd CROSS JOIN days d
+         LEFT JOIN touched t ON t.type = cd.type AND t.day = d.day`,
+      [baselineStart.toISOString(), sinceDate.toISOString()]
+    );
+
+    const tagTodayRes = await this.db.query(
+      `SELECT t.tag AS cohort_value,
+              COUNT(DISTINCT p.id)::int AS count,
+              array_agg(DISTINCT p.slug) AS slugs
+         FROM tags t JOIN pages p ON p.id = t.page_id
+        WHERE p.updated_at >= $1::timestamptz AND p.updated_at < $2::timestamptz
+        GROUP BY 1`,
+      [sinceIso, sinceEnd.toISOString()]
+    );
+
+    const typeTodayRes = await this.db.query(
+      `SELECT p.type AS cohort_value,
+              COUNT(DISTINCT p.id)::int AS count,
+              array_agg(DISTINCT p.slug) AS slugs
+         FROM pages p
+        WHERE p.updated_at >= $1::timestamptz AND p.updated_at < $2::timestamptz
+        GROUP BY 1`,
+      [sinceIso, sinceEnd.toISOString()]
+    );
+
+    const baseline = [
+      ...(tagBaselineRes.rows as Record<string, unknown>[]).map(r => ({
+        cohort_kind: 'tag' as const,
+        cohort_value: String(r.cohort_value),
+        day: String(r.day),
+        count: Number(r.count),
+      })),
+      ...(typeBaselineRes.rows as Record<string, unknown>[]).map(r => ({
+        cohort_kind: 'type' as const,
+        cohort_value: String(r.cohort_value),
+        day: String(r.day),
+        count: Number(r.count),
+      })),
+    ];
+    const today = [
+      ...(tagTodayRes.rows as Record<string, unknown>[]).map(r => ({
+        cohort_kind: 'tag' as const,
+        cohort_value: String(r.cohort_value),
+        count: Number(r.count),
+        page_slugs: (r.slugs as string[]) ?? [],
+      })),
+      ...(typeTodayRes.rows as Record<string, unknown>[]).map(r => ({
+        cohort_kind: 'type' as const,
+        cohort_value: String(r.cohort_value),
+        count: Number(r.count),
+        page_slugs: (r.slugs as string[]) ?? [],
+      })),
+    ];
+
+    return computeAnomaliesFromBuckets(baseline, today, sigma);
   }
 }
 

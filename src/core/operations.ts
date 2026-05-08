@@ -17,6 +17,14 @@ import { captureEvalCandidate, isEvalCaptureEnabled, isEvalScrubEnabled } from '
 import type { HybridSearchMeta } from './types.ts';
 import { extractPageLinks, isAutoLinkEnabled, isAutoTimelineEnabled, parseTimelineEntries, makeResolver, type UnresolvedFrontmatterRef } from './link-extraction.ts';
 import * as db from './db.ts';
+import {
+  GET_RECENT_SALIENCE_DESCRIPTION,
+  FIND_ANOMALIES_DESCRIPTION,
+  GET_RECENT_TRANSCRIPTS_DESCRIPTION,
+  LIST_PAGES_DESCRIPTION,
+  QUERY_DESCRIPTION,
+  SEARCH_DESCRIPTION,
+} from './operations-descriptions.ts';
 
 // --- Types ---
 
@@ -726,21 +734,43 @@ const purge_deleted_pages: Operation = {
   cliHints: { name: 'purge-deleted' },
 };
 
+const LIST_PAGES_SORT_VALUES = ['updated_desc', 'updated_asc', 'created_desc', 'slug'] as const;
+type ListPagesSort = typeof LIST_PAGES_SORT_VALUES[number];
+
 const list_pages: Operation = {
   name: 'list_pages',
-  description: 'List pages with optional filters. Soft-deleted pages are hidden by default; pass include_deleted: true to surface them with deleted_at populated.',
+  description: LIST_PAGES_DESCRIPTION,
   params: {
     type: { type: 'string', description: 'Filter by page type' },
     tag: { type: 'string', description: 'Filter by tag' },
     limit: { type: 'number', description: 'Max results (default 50)' },
+    // v0.29 — surface filter that already exists on PageFilters.
+    updated_after: {
+      type: 'string',
+      description: 'ISO date (YYYY-MM-DD) or full timestamp. Returns pages with updated_at > value.',
+    },
+    sort: {
+      type: 'string',
+      enum: [...LIST_PAGES_SORT_VALUES],
+      description: 'Sort order. Default updated_desc (matches pre-v0.29). Options: updated_desc, updated_asc, created_desc, slug.',
+    },
     include_deleted: { type: 'boolean', description: 'v0.26.5: include soft-deleted pages (default: false). Used by restore workflows and operator diagnostics.' },
   },
   handler: async (ctx, p) => {
+    // Whitelist the sort enum at the handler before passing to the engine.
+    // Engines also whitelist via PAGE_SORT_SQL but defending here keeps
+    // unsupported strings from reaching the SQL layer.
+    const rawSort = p.sort as string | undefined;
+    const sort = rawSort && (LIST_PAGES_SORT_VALUES as readonly string[]).includes(rawSort)
+      ? (rawSort as ListPagesSort)
+      : undefined;
     const pages = await ctx.engine.listPages({
       type: p.type as any,
       tag: p.tag as string,
       limit: clampSearchLimit(p.limit as number | undefined, 50, 100),
       includeDeleted: (p.include_deleted as boolean) === true,
+      updated_after: typeof p.updated_after === 'string' ? p.updated_after : undefined,
+      sort,
     });
     return pages.map(pg => ({
       slug: pg.slug,
@@ -758,7 +788,7 @@ const list_pages: Operation = {
 
 const search: Operation = {
   name: 'search',
-  description: 'Keyword search using full-text search',
+  description: SEARCH_DESCRIPTION,
   params: {
     query: { type: 'string', required: true },
     limit: { type: 'number', description: 'Max results (default 20)' },
@@ -804,9 +834,19 @@ const search: Operation = {
 
 const query: Operation = {
   name: 'query',
-  description: 'Hybrid search with vector + keyword + multi-query expansion',
+  description: QUERY_DESCRIPTION,
   params: {
-    query: { type: 'string', required: true },
+    // v0.27.1: `query` is no longer strictly required — `--image <path>`
+    // is the alternative entry point for image-similarity search. The CLI
+    // validator at src/cli.ts honors `cliHints.altRequired` and admits the
+    // image-only invocation. MCP / programmatic callers must still pass
+    // `query` OR `image` (handler refuses if both are absent).
+    query: { type: 'string', required: false },
+    /** v0.27.1: image-similarity search. Path resolved on the CLI side
+     *  before the op fires (the op receives raw bytes neither side; the
+     *  CLI loads the file, base64-encodes, and passes through `image`). */
+    image: { type: 'string', description: 'Base64-encoded image bytes for image-similarity search (CLI: --image <path>).' },
+    image_mime: { type: 'string', description: 'MIME type for the image bytes (auto-derived from path on CLI; required when calling op directly).' },
     limit: { type: 'number', description: 'Max results (default 20)' },
     offset: { type: 'number', description: 'Skip first N results (for pagination)' },
     expand: { type: 'boolean', description: 'Enable multi-query expansion (default: true)' },
@@ -817,12 +857,65 @@ const query: Operation = {
     // v0.20.0 Cathedral II Layer 7 (A2) / Layer 10 C3: two-pass structural expansion.
     near_symbol: { type: 'string', description: 'Anchor retrieval at this qualified symbol name (e.g., BrainEngine.searchKeyword). Enables A2 two-pass.' },
     walk_depth: { type: 'number', description: 'Structural walk depth 1-2. Default 0 (off). Expands anchors through code_edges with 1/(1+hop) decay.' },
+    // v0.29.1 — orthogonal recency + salience axes. YOU (the agent) decide.
+    salience: {
+      type: 'string',
+      enum: ['off', 'on', 'strong'],
+      description:
+        "v0.29.1 salience boost — emotional_weight + take_count, NO time component.\n" +
+        "  'off' — default for entity / canonical / definitional queries\n" +
+        "  'on'  — surface emotionally-weighted + take-rich pages\n" +
+        "  'strong' — aggressive mattering tilt\n" +
+        "Omit and gbrain auto-detects from query text. Independent of `recency`.",
+    },
+    recency: {
+      type: 'string',
+      enum: ['off', 'on', 'strong'],
+      description:
+        "v0.29.1 recency boost — per-prefix age decay, NO mattering signal.\n" +
+        "  'off' — default for canonical truth\n" +
+        "  'on'  — daily/, media/x/, chat/ decay aggressively; concepts/, originals/, writing/ stay evergreen\n" +
+        "  'strong' — multiplies the recency factor by 1.5 (use for 'today' / 'right now')\n" +
+        "Omit and gbrain auto-detects. Independent of `salience` (orthogonal axes).",
+    },
+    since: {
+      type: 'string',
+      description:
+        "v0.29.1 — filter to pages whose effective_date is >= this. ISO-8601 (YYYY-MM-DD or full timestamp) OR relative ('7d', '2w', '1y'). Replaces deprecated `afterDate`.",
+    },
+    until: {
+      type: 'string',
+      description:
+        "v0.29.1 — filter to effective_date <= this. Same format as `since`. Replaces deprecated `beforeDate`. YYYY-MM-DD lands at end-of-day.",
+    },
   },
   handler: async (ctx, p) => {
     const startedAt = Date.now();
     const expand = p.expand !== false;
     const detail = (p.detail as 'low' | 'medium' | 'high') || undefined;
-    const queryText = p.query as string;
+    const queryText = p.query as string | undefined;
+    const imageData = p.image as string | undefined;
+    const imageMime = (p.image_mime as string) || 'image/jpeg';
+
+    // v0.27.1: image-similarity branch. Bypasses hybridSearch (which is
+    // text-only); embeds the image via embedMultimodal and runs a direct
+    // vector search against the embedding_image column.
+    if (imageData) {
+      const { embedMultimodal } = await import('./ai/gateway.ts');
+      const [vec] = await embedMultimodal([
+        { kind: 'image_base64', data: imageData, mime: imageMime },
+      ]);
+      const results = await ctx.engine.searchVector(vec, {
+        limit: (p.limit as number) || 20,
+        offset: (p.offset as number) || 0,
+        embeddingColumn: 'embedding_image',
+      });
+      return results;
+    }
+
+    if (!queryText) {
+      throw new Error('query requires either `query` (text) or `image` (base64 bytes).');
+    }
 
     // v0.25.0 — capture meta side-channel. hybridSearch's return contract
     // stays SearchResult[] (Cathedral II callers depend on that); meta
@@ -838,6 +931,11 @@ const query: Operation = {
       symbolKind: (p.symbol_kind as string) || undefined,
       nearSymbol: (p.near_symbol as string) || undefined,
       walkDepth: typeof p.walk_depth === 'number' ? (p.walk_depth as number) : undefined,
+      // v0.29.1 — agent-explicit recency + salience. Omitted = heuristic defaults.
+      salience: p.salience as 'off' | 'on' | 'strong' | undefined,
+      recency: p.recency as 'off' | 'on' | 'strong' | undefined,
+      since: typeof p.since === 'string' ? p.since : undefined,
+      until: typeof p.until === 'string' ? p.until : undefined,
       onMeta: (m) => { capturedMeta = m; },
     });
     const latency_ms = Date.now() - startedAt;
@@ -1750,6 +1848,112 @@ const find_orphans: Operation = {
   cliHints: { name: 'orphans', hidden: true },
 };
 
+// --- v0.29: Salience + Anomaly Detection ---
+
+const get_recent_salience: Operation = {
+  name: 'get_recent_salience',
+  description: GET_RECENT_SALIENCE_DESCRIPTION,
+  scope: 'read',
+  params: {
+    days: { type: 'number', description: 'Window in days. Default 14.' },
+    limit: { type: 'number', description: 'Max results (default 20, capped at 100).' },
+    slugPrefix: {
+      type: 'string',
+      description: "Optional slug-prefix filter, e.g. 'personal' or 'wiki/people'.",
+    },
+    recency_bias: {
+      type: 'string',
+      enum: ['flat', 'on'],
+      description:
+        "v0.29.1: how to weight recency in the salience score.\n" +
+        "  'flat' (DEFAULT) — v0.29.0 behavior. Every page gets 1/(1+days_old).\n" +
+        "                     Stable, predictable; what most callers want.\n" +
+        "  'on'             — Per-prefix decay map. concepts/originals/writing/\n" +
+        "                     become evergreen (recency component = 0); daily/,\n" +
+        "                     media/x/, chat/ decay aggressively. Use when the\n" +
+        "                     user explicitly biases for recency-aware salience\n" +
+        "                     ('what's been salient lately' vs 'what matters\n" +
+        "                     in this brain regardless of when').",
+    },
+  },
+  handler: async (ctx, p) => {
+    const recencyBias = p.recency_bias === 'on' ? 'on' : 'flat';
+    return ctx.engine.getRecentSalience({
+      days: typeof p.days === 'number' ? p.days : undefined,
+      limit: typeof p.limit === 'number' ? p.limit : undefined,
+      slugPrefix: typeof p.slugPrefix === 'string' ? p.slugPrefix : undefined,
+      recency_bias: recencyBias,
+    });
+  },
+  cliHints: { name: 'salience' },
+};
+
+const find_anomalies: Operation = {
+  name: 'find_anomalies',
+  description: FIND_ANOMALIES_DESCRIPTION,
+  scope: 'read',
+  params: {
+    since: {
+      type: 'string',
+      description: 'ISO date YYYY-MM-DD. Default = today (UTC).',
+    },
+    lookback_days: {
+      type: 'number',
+      description: 'Days of history for the baseline. Default 30.',
+    },
+    sigma: {
+      type: 'number',
+      description: 'Sigma threshold. Default 3.0.',
+    },
+  },
+  handler: async (ctx, p) => {
+    return ctx.engine.findAnomalies({
+      since: typeof p.since === 'string' ? p.since : undefined,
+      lookback_days: typeof p.lookback_days === 'number' ? p.lookback_days : undefined,
+      sigma: typeof p.sigma === 'number' ? p.sigma : undefined,
+    });
+  },
+  cliHints: { name: 'anomalies' },
+};
+
+const get_recent_transcripts: Operation = {
+  name: 'get_recent_transcripts',
+  description: GET_RECENT_TRANSCRIPTS_DESCRIPTION,
+  scope: 'read',
+  // Local-only: rejects HTTP-borne MCP traffic at tool-list time
+  // (serve-http.ts filters on `localOnly`) AND at runtime via the in-handler
+  // ctx.remote check. Defense in depth: hidden + rejected.
+  localOnly: true,
+  params: {
+    days: { type: 'number', description: 'Window in days. Default 7.' },
+    summary: {
+      type: 'boolean',
+      description: 'When true (default), return first ~300 chars per transcript. When false, full content (capped at 100 KB per file).',
+    },
+    limit: { type: 'number', description: 'Max transcripts (default 50).' },
+  },
+  handler: async (ctx, p) => {
+    // Trust gate (eng review D2 + codex C3): MCP / HTTP callers (`remote=true`)
+    // are blocked. Local CLI callers (`remote=false`) and the trusted-workspace
+    // dream cycle pass through. This op is intentionally NOT in the subagent
+    // allow-list (subagents always run with remote=true; they would always be
+    // rejected, which is a footgun if the op is visible).
+    if (ctx.remote === true) {
+      throw new OperationError(
+        'permission_denied',
+        'get_recent_transcripts is local-only — call via the gbrain CLI.',
+      );
+    }
+    const { listRecentTranscripts } = await import('./transcripts.ts');
+    return listRecentTranscripts(ctx.engine, {
+      days: typeof p.days === 'number' ? p.days : undefined,
+      summary: typeof p.summary === 'boolean' ? p.summary : undefined,
+      limit: typeof p.limit === 'number' ? p.limit : undefined,
+    });
+  },
+  cliHints: { name: 'transcripts', hidden: true },
+};
+
 // --- v0.28: whoami + sources management ---
 
 const whoami: Operation = {
@@ -1989,6 +2193,8 @@ export const operations: Operation[] = [
   takes_list, takes_search, think,
   // v0.28: whoami + scoped sources management
   whoami, sources_add, sources_list, sources_remove, sources_status,
+  // v0.29: Salience + anomalies + recent transcripts
+  get_recent_salience, find_anomalies, get_recent_transcripts,
 ];
 
 export const operationsByName = Object.fromEntries(
