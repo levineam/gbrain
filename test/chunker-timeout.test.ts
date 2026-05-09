@@ -12,12 +12,13 @@
  * stub the ParserLike seam directly to assert the timeout contract,
  * then verify the env wiring with a 1ms cap that reliably loses.
  */
-import { describe, test, expect, afterEach } from 'bun:test';
+import { describe, test, expect } from 'bun:test';
 import {
   parseWithTimeout,
   ChunkerTimeoutError,
   chunkCodeTextFull,
 } from '../src/core/chunkers/code.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 const REAL_TS = `export function add(a: number, b: number): number { return a + b; }
 export class Counter {
@@ -26,17 +27,6 @@ export class Counter {
   get value(): number { return this.n; }
 }
 `;
-
-let originalTimeoutEnv: string | undefined;
-
-afterEach(() => {
-  if (originalTimeoutEnv !== undefined) {
-    process.env.GBRAIN_CHUNKER_TIMEOUT_MS = originalTimeoutEnv;
-  } else {
-    delete process.env.GBRAIN_CHUNKER_TIMEOUT_MS;
-  }
-  originalTimeoutEnv = undefined;
-});
 
 describe('parseWithTimeout — pure-function seam', () => {
   test('1. throws ChunkerTimeoutError when parser.parse returns null', () => {
@@ -98,14 +88,13 @@ describe('chunkCodeTextFull — integration with real parser', () => {
     // 1ms is below any plausible real-parser wall-clock. The parser
     // returns null; chunkCodeTextFull catches the ChunkerTimeoutError
     // and falls back to fallbackChunks (recursive text chunker).
-    originalTimeoutEnv = process.env.GBRAIN_CHUNKER_TIMEOUT_MS;
-    process.env.GBRAIN_CHUNKER_TIMEOUT_MS = '1';
-
-    const result = await chunkCodeTextFull(REAL_TS, 'sample.ts');
-    // Recursive fallback still produces chunks; assertion is that the
-    // call returned cleanly instead of hanging.
-    expect(Array.isArray(result.chunks)).toBe(true);
-    expect(result.edges).toEqual([]); // edges only emitted on tree-sitter path
+    await withEnv({ GBRAIN_CHUNKER_TIMEOUT_MS: '1' }, async () => {
+      const result = await chunkCodeTextFull(REAL_TS, 'sample.ts');
+      // Recursive fallback still produces chunks; assertion is that the
+      // call returned cleanly instead of hanging.
+      expect(Array.isArray(result.chunks)).toBe(true);
+      expect(result.edges).toEqual([]); // edges only emitted on tree-sitter path
+    });
   });
 });
 
@@ -118,12 +107,11 @@ describe('cleanup contract under exception', () => {
     // few times must not leak (smoke test — Bun GC won't catch a real
     // WASM leak but if cleanup were missing on the throw path, repeated
     // calls would visibly degrade).
-    originalTimeoutEnv = process.env.GBRAIN_CHUNKER_TIMEOUT_MS;
-    process.env.GBRAIN_CHUNKER_TIMEOUT_MS = '1';
-
-    for (let i = 0; i < 5; i++) {
-      const result = await chunkCodeTextFull(REAL_TS, `sample-${i}.ts`);
-      expect(Array.isArray(result.chunks)).toBe(true);
-    }
+    await withEnv({ GBRAIN_CHUNKER_TIMEOUT_MS: '1' }, async () => {
+      for (let i = 0; i < 5; i++) {
+        const result = await chunkCodeTextFull(REAL_TS, `sample-${i}.ts`);
+        expect(Array.isArray(result.chunks)).toBe(true);
+      }
+    });
   });
 });
