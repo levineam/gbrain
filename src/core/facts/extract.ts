@@ -24,7 +24,25 @@
 import { chat, embedOne, isAvailable } from '../ai/gateway.ts';
 import type { ChatResult } from '../ai/gateway.ts';
 import { INJECTION_PATTERNS } from '../think/sanitize.ts';
-import type { NewFact, FactKind } from '../engine.ts';
+import type { BrainEngine, NewFact, FactKind } from '../engine.ts';
+
+/**
+ * v0.31 (D15): kill-switch for fact extraction.
+ *
+ * Read the `facts.extraction_enabled` config row. Defaults to TRUE (on by
+ * default — the headline feature should ship enabled). Operators flip it
+ * to 'false' / '0' / 'no' / 'off' (case-insensitive) via
+ * `gbrain config set facts.extraction_enabled false` to disable extraction
+ * across the brain without requiring a binary downgrade.
+ *
+ * Same truthiness conventions as isAutoLinkEnabled / isAutoTimelineEnabled.
+ */
+export async function isFactsExtractionEnabled(engine: BrainEngine): Promise<boolean> {
+  const val = await engine.getConfig('facts.extraction_enabled');
+  if (val == null) return true;
+  const normalized = val.trim().toLowerCase();
+  return !['false', '0', 'no', 'off'].includes(normalized);
+}
 
 export const ALL_EXTRACT_KINDS: readonly FactKind[] = [
   'event', 'preference', 'commitment', 'belief', 'fact',

@@ -68,11 +68,12 @@ describe('put_page facts backstop', () => {
     // is acceptable; we only insist the gating doesn't reject on the
     // happy path.
     expect(result).toBeDefined();
-    if ('queued' in result!) {
-      expect(result.queued).toBe(true);
+    const r = result!;
+    if ('queued' in r) {
+      expect(r.queued).toBe(true);
     } else {
       // 'backstop_error' or 'queue_shutdown' would be a real failure.
-      expect(result.skipped).toMatch(/^(queue_shutdown|backstop_error)?$/);
+      expect(r.skipped).toMatch(/^(queue_shutdown|backstop_error)?$/);
     }
   });
 
@@ -82,9 +83,10 @@ describe('put_page facts backstop', () => {
       `---\ntype: guide\ntitle: Guide\n---\n${'guide content here. '.repeat(20)}`,
     );
     expect(result).toBeDefined();
-    if ('skipped' in result!) {
+    const r = result!;
+    if ('skipped' in r) {
       // 'kind:guide' or any other skipped reason is the expected shape.
-      expect(result.skipped.startsWith('kind:') || result.skipped === 'too_short').toBe(true);
+      expect(r.skipped.startsWith('kind:') || r.skipped === 'too_short').toBe(true);
     }
   });
 });

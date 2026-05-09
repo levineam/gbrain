@@ -510,7 +510,11 @@ const put_page: Operation = {
     // ingest, file uploads, code pages). Never blocks the put_page response.
     let factsQueued: { queued: boolean } | { skipped: string } | undefined;
     try {
-      const eligible = isFactsBackstopEligible(slug, result.parsedPage);
+      const { isFactsExtractionEnabled } = await import('./facts/extract.ts');
+      const enabled = await isFactsExtractionEnabled(ctx.engine);
+      const eligible = enabled
+        ? isFactsBackstopEligible(slug, result.parsedPage)
+        : { ok: false as const, reason: 'extraction_disabled' };
       if (!eligible.ok) {
         factsQueued = { skipped: eligible.reason };
       } else {
@@ -2084,8 +2088,16 @@ const extract_facts: Operation = {
   scope: 'write',
   handler: async (ctx, p) => {
     if (ctx.dryRun) return { dry_run: true, action: 'extract_facts' };
-    const { extractFactsFromTurn } = await import('./facts/extract.ts');
+    const { extractFactsFromTurn, isFactsExtractionEnabled } = await import('./facts/extract.ts');
     const { resolveEntitySlug } = await import('./entities/resolve.ts');
+
+    // D15: kill switch. Operator can disable facts extraction across the
+    // brain without binary downgrade by setting `facts.extraction_enabled`
+    // to false. Returns zero-counts envelope so callers see a clean
+    // success rather than a 'permission_denied' false alarm.
+    if (!(await isFactsExtractionEnabled(ctx.engine))) {
+      return { inserted: 0, duplicate: 0, superseded: 0, fact_ids: [], skipped: 'extraction_disabled' };
+    }
 
     const sourceId = ctx.sourceId ?? 'default';
     const visibility = p.visibility === 'world' ? 'world' : 'private';
