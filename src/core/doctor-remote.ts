@@ -53,10 +53,28 @@ export async function runRemoteDoctor(config: GBrainConfig, args: string[]): Pro
 }
 
 /**
+ * v0.31.1: opts for collectRemoteDoctorReport.
+ *
+ * `skipScopeProbe` defaults to false. Set to true in test fixtures that
+ * mock /mcp at JSON-RPC initialize level only — the MCP SDK Client used
+ * by the scope probe hangs on shape mismatch and doesn't always honor
+ * AbortSignal. Production callers always run the probe.
+ *
+ * Also honors GBRAIN_DOCTOR_SKIP_SCOPE_PROBE=1 for ops bypass; explicit
+ * opts.skipScopeProbe wins.
+ */
+export interface CollectRemoteDoctorOpts {
+  skipScopeProbe?: boolean;
+}
+
+/**
  * Pure data collector — separated from the print/exit logic so tests can
  * assert the report shape without intercepting stdout.
  */
-export async function collectRemoteDoctorReport(config: GBrainConfig): Promise<RemoteDoctorReport> {
+export async function collectRemoteDoctorReport(
+  config: GBrainConfig,
+  opts: CollectRemoteDoctorOpts = {},
+): Promise<RemoteDoctorReport> {
   const remote = config.remote_mcp;
   const checks: RemoteCheck[] = [];
 
@@ -189,11 +207,13 @@ export async function collectRemoteDoctorReport(config: GBrainConfig): Promise<R
   // `gbrain stats` / `gbrain history` and fail today; this check surfaces
   // the gap during `gbrain remote doctor` instead of mid-command.
   //
-  // Skippable via GBRAIN_DOCTOR_SKIP_SCOPE_PROBE=1 for test fixtures that
-  // mock /mcp without implementing full JSON-RPC tools/call (the MCP SDK
-  // Client hangs on shape mismatch and doesn't always honor AbortSignal).
+  // Skippable via opts.skipScopeProbe (preferred for tests) OR
+  // GBRAIN_DOCTOR_SKIP_SCOPE_PROBE=1 (env-flag for ops bypass) — the MCP
+  // SDK Client hangs on JSON-RPC shape mismatch in fixtures that don't
+  // implement full tools/call.
   const grantedScope = tokenRes.token.scope ?? '';
-  if (process.env.GBRAIN_DOCTOR_SKIP_SCOPE_PROBE !== '1') {
+  const skipProbe = opts.skipScopeProbe || process.env.GBRAIN_DOCTOR_SKIP_SCOPE_PROBE === '1';
+  if (!skipProbe) {
     const scopeResult = await probeScopes(config);
     checks.push(buildScopeCheck(grantedScope, scopeResult));
   }
