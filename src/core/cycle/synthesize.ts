@@ -989,3 +989,11 @@ function failed(error: PhaseError): PhaseResult {
 function makeError(cls: string, code: string, message: string, hint?: string): PhaseError {
   return hint ? { class: cls, code, message, hint } : { class: cls, code, message };
 }
+
+// ── Test-only export ───────────────────────────────────────
+// `__testing` re-exports otherwise-private helpers so unit tests can pin
+// behavior at function granularity (e.g., #745 collectChildPutPageSlugs
+// double-encoded jsonb regression). Not part of the runtime contract.
+export const __testing = {
+  collectChildPutPageSlugs,
+};
