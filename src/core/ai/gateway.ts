@@ -246,7 +246,14 @@ export function isAvailable(touchpoint: TouchpointKind): boolean {
  * The mutated body is what gets sent on the wire; the AI SDK still receives a
  * base64-encoded response and decodes it as expected.
  */
-const voyageCompatFetch: typeof fetch = async (input, init) => {
+// Cast through `unknown` because Bun's `typeof fetch` extends the standard
+// signature with a `preconnect` method that arrow functions can't provide.
+// The AI SDK only invokes the call signature; the Bun extension is irrelevant
+// here. Without this cast, `tsc --noEmit` fails:
+//   error TS2741: Property 'preconnect' is missing in type
+//   '(input: RequestInfo | URL, init: RequestInit | ...) => Promise<Response>'
+//   but required in type 'typeof fetch'.
+const voyageCompatFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   // OUTBOUND: rewrite request body for Voyage's actual API contract.
   if (init?.body && typeof init.body === 'string') {
     try {
@@ -322,7 +329,7 @@ const voyageCompatFetch: typeof fetch = async (input, init) => {
     // If parsing/transformation fails, fall back to the original response.
     return resp;
   }
-};
+}) as unknown as typeof fetch;
 
 async function resolveEmbeddingProvider(modelStr: string): Promise<{ model: any; recipe: Recipe; modelId: string }> {
   const { parsed, recipe } = resolveRecipe(modelStr);
