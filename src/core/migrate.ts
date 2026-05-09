@@ -2185,6 +2185,7 @@ export const MIGRATIONS: Migration[] = [
     sql: `
       ALTER TABLE pages ADD COLUMN IF NOT EXISTS emotional_weight_recomputed_at TIMESTAMPTZ;
     `,
+  },
   {
     version: 45,
     name: 'facts_hot_memory_v0_31',
