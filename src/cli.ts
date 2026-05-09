@@ -1052,9 +1052,19 @@ async function handleCliOnly(command: string, args: string[]) {
         // src/core/backfill-effective-date.ts (same code path the v0.29.1
         // migration orchestrator uses). The orchestrator runs once on
         // upgrade; this command is for after-the-fact frontmatter edits.
+        //
+        // v0.30.1: still works; canonical entrypoint is now `gbrain backfill
+        // effective_date`. This command stays as a thin alias for back-compat.
         const { reindexFrontmatterCli } = await import('./commands/reindex-frontmatter.ts');
         await reindexFrontmatterCli(args);
         return; // reindexFrontmatterCli handles its own engine lifecycle
+      }
+      case 'backfill': {
+        // v0.30.1: first-class generic backfill command. Subcommand dispatch
+        // is inside runBackfillCommand (kind | list | --help).
+        const { runBackfillCommand } = await import('./commands/backfill.ts');
+        await runBackfillCommand(args);
+        return;
       }
       case 'code-callers': {
         // v0.20.0 Cathedral II Layer 10 (C4): "who calls <symbol>?"
@@ -1104,7 +1114,7 @@ function buildGatewayConfig(c: GBrainConfig): AIGatewayConfig {
   };
 }
 
-async function connectEngine(): Promise<BrainEngine> {
+async function connectEngine(opts?: { probeOnly?: boolean }): Promise<BrainEngine> {
   const config = loadConfig();
   if (!config) {
     console.error('No brain configured. Run: gbrain init');
@@ -1122,6 +1132,14 @@ async function connectEngine(): Promise<BrainEngine> {
                   process.env.GBRAIN_NO_RETRY_CONNECT === '1';
   const { connectWithRetry } = await import('./core/db.ts');
   await connectWithRetry(engine, toEngineConfig(config), { noRetry });
+
+  // v0.30.1 (Codex X1 / C2): probeOnly skips both hasPendingMigrations() probe
+  // AND initSchema(). Used by `get_health` MCP op + `gbrain upgrade --status`
+  // + doctor's migration_wedge check — these surfaces report wedge state and
+  // must NEVER themselves start or block on migrations.
+  if (opts?.probeOnly === true) {
+    return engine;
+  }
 
   // Auto-apply pending schema migrations on connect (#651). Cheap probe
   // first so already-migrated brains don't pay the bootstrap-probe +

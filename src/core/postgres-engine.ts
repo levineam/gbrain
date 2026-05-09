@@ -14,7 +14,7 @@ import { deriveResolutionTuple, finalizeScorecard } from './takes-resolution.ts'
 import { runMigrations } from './migrate.ts';
 import { SCHEMA_SQL } from './schema-embedded.ts';
 import { verifySchema } from './schema-verify.ts';
-import { applyChunkEmbeddingIndexPolicy } from './vector-index.ts';
+import { applyChunkEmbeddingIndexPolicy, dropZombieIndexes } from './vector-index.ts';
 import type {
   Page, PageInput, PageFilters, PageType,
   Chunk, ChunkInput, StaleChunkRow,
@@ -34,6 +34,8 @@ import type {
 import { GBrainError, PAGE_SORT_SQL } from './types.ts';
 import { computeAnomaliesFromBuckets } from './cycle/anomaly.ts';
 import * as db from './db.ts';
+import { ConnectionManager } from './connection-manager.ts';
+import { logConnectionEvent } from './connection-audit.ts';
 import { validateSlug, contentHash, rowToPage, rowToChunk, rowToSearchResult, parseEmbedding, tryParseEmbedding, takeRowToTake } from './utils.ts';
 import { resolveBoostMap, resolveHardExcludes } from './search/source-boost.ts';
 import { buildSourceFactorCase, buildHardExcludeClause, buildVisibilityClause, buildRecencyComponentSql } from './search/sql-ranking.ts';
@@ -68,7 +70,7 @@ export class PostgresEngine implements BrainEngine {
   readonly kind = 'postgres' as const;
   private _sql: ReturnType<typeof postgres> | null = null;
   /** Saved config for reconnection. */
-  private _savedConfig: (EngineConfig & { poolSize?: number }) | null = null;
+  private _savedConfig: (EngineConfig & { poolSize?: number; parentConnectionManager?: ConnectionManager }) | null = null;
   /** Whether a reconnect is in progress (prevents concurrent reconnects). */
   private _reconnecting = false;
   /**
@@ -81,6 +83,19 @@ export class PostgresEngine implements BrainEngine {
    */
   private _connectionStyle: 'instance' | 'module' | null = null;
 
+  /**
+   * v0.30.1 (Fix 1 + X1 + T5): instance-owned ConnectionManager.
+   * - INSTANCE-owned: each PostgresEngine constructs its own.
+   * - Worker engines (cycle, sync) inherit via opts.parentConnectionManager.
+   * - transaction() clones share the parent's via copy.
+   * - Module-singleton path (when poolSize unset) wraps the db.ts singleton.
+   *
+   * Public so callers can access read()/ddl()/bulk()/healthCheck() without
+   * threading the manager through every API. doctor's connection_routing
+   * check uses it; runMigrations() uses ddl().
+   */
+  connectionManager: ConnectionManager | null = null;
+
   // Instance connection (for workers) or fall back to module global (backward compat)
   get sql(): ReturnType<typeof postgres> {
     if (this._sql) return this._sql;
@@ -88,8 +103,9 @@ export class PostgresEngine implements BrainEngine {
   }
 
   // Lifecycle
-  async connect(config: EngineConfig & { poolSize?: number }): Promise<void> {
+  async connect(config: EngineConfig & { poolSize?: number; parentConnectionManager?: ConnectionManager }): Promise<void> {
     this._savedConfig = config;
+    const url = config.database_url;
     if (config.poolSize) {
       // Instance-level connection for worker isolation. resolvePoolSize lets
       // GBRAIN_POOL_SIZE cap below the caller's requested size when set — the
@@ -123,14 +139,39 @@ export class PostgresEngine implements BrainEngine {
       await this._sql`SELECT 1`;
       await db.setSessionDefaults(this._sql);
       this._connectionStyle = 'instance';
+
+      // v0.30.1: instance-owned ConnectionManager wraps the read pool we just
+      // built. Parent inheritance (T5/X1): worker engines pass their parent's
+      // manager so kill-switch state and direct pool are shared.
+      this.connectionManager = new ConnectionManager({
+        url,
+        parent: config.parentConnectionManager,
+        readPoolOwnedExternally: true, // we own _sql; manager just routes
+      });
+      this.connectionManager.setReadPool(this._sql);
     } else {
       // Module-level singleton (backward compat for CLI main engine)
       await db.connect(config);
       this._connectionStyle = 'module';
+
+      // v0.30.1: connection-manager wraps the module singleton.
+      if (url) {
+        this.connectionManager = new ConnectionManager({
+          url,
+          parent: config.parentConnectionManager,
+          readPoolOwnedExternally: true, // db.ts owns the pool
+        });
+        this.connectionManager.setReadPool(db.getConnection());
+      }
     }
   }
 
   async disconnect(): Promise<void> {
+    // v0.30.1: tear down the direct pool first if the manager owns one.
+    if (this.connectionManager) {
+      await this.connectionManager.disconnect();
+      this.connectionManager = null;
+    }
     if (this._sql) {
       await this._sql.end();
       this._sql = null;
@@ -147,7 +188,16 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async initSchema(): Promise<void> {
-    const conn = this.sql;
+    // v0.30.1 (X1): route DDL through the direct pool when ConnectionManager
+    // is in dual-pool mode. The pooler's 2-min statement_timeout truncates
+    // SCHEMA_SQL replays + migrations on Supabase; the direct pool gets
+    // 30min. Lane B replaces the lock primitive with a TTL+heartbeat table
+    // lock; Lane A does the routing and keeps pg_advisory_lock(42) on the
+    // SAME connection so the lock is correct.
+    const conn = this.connectionManager
+      ? await this.connectionManager.ddl()
+      : this.sql;
+
     // Resolve the embedding dim/model from the gateway (v0.14+).
     // Falls back to v0.13 defaults (1536d + text-embedding-3-large) when gateway isn't configured yet.
     let dims = 1536;
@@ -158,17 +208,22 @@ export class PostgresEngine implements BrainEngine {
       model = gw.getEmbeddingModel().split(':').slice(1).join(':') || model;
     } catch { /* gateway not yet configured — use defaults */ }
 
-    const sql = getPostgresSchema(dims, model);
+    const sqlText = getPostgresSchema(dims, model);
 
     // Advisory lock prevents concurrent initSchema() calls from deadlocking
     // on DDL statements (DROP TRIGGER + CREATE TRIGGER acquire AccessExclusiveLock).
     //
-    // Honest limitation: pg_advisory_lock(42) is session-scoped to this pooled
-    // connection. runMigrations() below uses engine.transaction() and
-    // withReservedConnection() which may hop to a different backend in the
-    // pool. Cross-process serialization of initSchema is best-effort, not a
-    // correctness guarantee. Pre-existing concern; the bootstrap doesn't
-    // change it.
+    // v0.30.1 honest limitation: pg_advisory_lock(42) is session-scoped to
+    // `conn`. When dual-pool routing is active, conn is a direct-pool reserved
+    // backend, so the lock is held for the duration of initSchema. Lane B
+    // replaces this with a TTL+heartbeat table lock that survives pooler-side
+    // session resets.
+    const t0 = Date.now();
+    logConnectionEvent({
+      pool: this.connectionManager?.isDualPoolActive() ? 'ddl' : 'read',
+      op: 'acquire',
+      caller: 'PostgresEngine.initSchema',
+    });
     await conn`SELECT pg_advisory_lock(42)`;
     try {
       // Pre-schema bootstrap: add forward-referenced state the embedded schema
@@ -176,7 +231,7 @@ export class PostgresEngine implements BrainEngine {
       // #378/#396 + #266/#357). Idempotent on fresh installs and modern brains.
       await this.applyForwardReferenceBootstrap();
 
-      await conn.unsafe(sql);
+      await conn.unsafe(sqlText);
 
       // Run any pending migrations automatically
       const { applied } = await runMigrations(this);
@@ -191,8 +246,24 @@ export class PostgresEngine implements BrainEngine {
       if (verify.healed.length > 0) {
         console.log(`  Schema verify: self-healed ${verify.healed.length} missing column(s)`);
       }
+
+      // v0.30.1 (Fix 5): sweep zombie HNSW indexes (indisvalid=false) from
+      // crashed CREATE INDEX CONCURRENTLY calls. Best-effort; errors logged
+      // to stderr but never block engine.connect.
+      try {
+        const result = await dropZombieIndexes(this);
+        if (result.dropped.length > 0) {
+          console.log(`  HNSW sweep: dropped ${result.dropped.length} zombie index(es)`);
+        }
+      } catch { /* best-effort */ }
     } finally {
       await conn`SELECT pg_advisory_unlock(42)`;
+      logConnectionEvent({
+        pool: this.connectionManager?.isDualPoolActive() ? 'ddl' : 'read',
+        op: 'release',
+        caller: 'PostgresEngine.initSchema',
+        duration_ms: Date.now() - t0,
+      });
     }
   }
 

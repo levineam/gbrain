@@ -136,6 +136,134 @@ warns about the new `oauth_client_scopes_probe` check:
   follow-up TODO. v0.31.1 refuses both at the top level with hints pointing at
   MCP tools.
 
+## [0.30.2] - 2026-05-08
+
+**Dream synthesize stops dropping fat transcripts. Subagents that overflow Anthropic's context die once, not three times. The queue stops clogging.**
+
+The v0.30 dream cycle has been stalled since May 2 for one user — daily aggregated transcripts at 2.7-4.5MB each generate 1.7M-token Anthropic prompts, which hit the 1M-token hard limit and 400. The subagent handler treated those failures as renewable, so every doomed transcript stalled three times before dead-lettering, and every new cycle re-discovered and re-submitted the same fat transcripts. Six days of synth backlog, queue full of doomed work.
+
+v0.30.2 adds model-aware chunking + terminal-error classification + a poison-pill-free skip path. Wintermute's [PR #748](https://github.com/garrytan/gbrain/pull/748) supplied the boundary heuristics (`## Topic:` → `---` → `\n` ladder) and the `dream.synthesize.max_prompt_tokens` config surface. Garry's branch extended that with model-aware budgets, deterministic chunk identity for partial-progress safety, orchestrator-side slug rewriting for zero Sonnet trust on collisions, and doctor-surface visibility.
+
+### What you can now do
+
+**Fat transcripts get synthesized instead of dropped.** A 4.5MB daily-aggregated transcript on Sonnet 4.6 (200K context) now chunks into 7-8 children at the 630KB-per-chunk default budget, each subagent processes its slice, and the orchestrator collects everything. Per-chunk children are independent — chunk 5's content doesn't leak into chunk 6's prompt.
+
+**Doomed transcripts die loud, not silent.** Anthropic 400 "prompt is too long" responses now classify as `UnrecoverableError`. The job goes straight to `dead` on first attempt. No three-stall retry pile. `gbrain doctor` surfaces the count under `queue_health` with a fix hint pointing at `gbrain dream --phase synthesize --dry-run --json` so you can identify the offender.
+
+**Existing single-chunk transcripts are not re-synthesized on upgrade.** The legacy `dream:synth:<filePath>:<hash16>` idempotency-key shape is preserved byte-for-byte for the single-chunk case. Already-synthesized transcripts skip with `already_synthesized_legacy_single_chunk` — no re-spend on Sonnet for content already in the brain.
+
+```bash
+# Operator escape hatches
+gbrain config set dream.synthesize.max_prompt_tokens 600000     # tune chunk budget below model context
+gbrain config set dream.synthesize.max_chunks_per_transcript 32 # raise the chunk-explosion cap
+gbrain jobs prune --status dead --queue default                 # one-time cleanup of pre-v0.30.2 doomed jobs
+```
+
+### How it works under the hood
+
+**Model-aware chunk budget.** A static `MODEL_CONTEXT_TOKENS` map keys on the resolved Anthropic model id (Opus 4.7 → 1M, Sonnet 4.6 → 200K, Haiku → 200K). Per-chunk budget is `floor(context × 0.9 × 3.5 chars/token)`, leaving 10% headroom for system prompt + tool defs + output. Non-Anthropic ids (`gpt-5`, `gemini-3-pro`, custom alias) fall back to a 180K-token safe default with a once-per-process stderr warning.
+
+**Hash-deterministic chunk identity.** `splitTranscriptByBudget(content, contentHash, maxChars)` is a pure function. The 3-tier boundary search window (back-half-of-budget) gets seeded with a deterministic offset derived from the first 32 bits of `contentHash`, so the same content always chunks identically. Chunk 2 of a transcript that died terminally produces byte-identical content on retry — per-chunk idempotency keys (`dream:synth:<filePath>:<hash16>:c<i>of<n>`) are durable across runs.
+
+**Orchestrator-side slug rewrite, zero Sonnet trust.** `collectChildPutPageSlugs` no longer does `SELECT DISTINCT` (which would erase collision evidence). Instead it raw-fetches every (job_id, slug) pair, then for chunked children rewrites bare-hash6 slugs to `<hash6>-c<idx>` if Sonnet drops the chunk suffix. Two siblings can't collide even if Sonnet ignores the prompt's `USE THIS in slugs` rule.
+
+**Cap-hit skips don't poison the verdict cache.** When chunks exceed `max_chunks_per_transcript` (default 24), the orchestrator logs + skips without writing to `dream_verdicts`. Next cycle re-attempts under whatever budget is then current — closes the cache-poisoning class entirely.
+
+### Out of scope (deferred to v0.30.3+)
+
+- **Per-turn token-budget guard in subagent.ts.** This release bounds the INITIAL prompt size only. Tool-loop accumulation (search/get_page results bloating each subsequent turn) can still hit `prompt_too_long` mid-conversation; the terminal-error classification catches it then, just less cleanly.
+- **Tighter token estimator for code/JSON/CJK-dense content.** The 3.5 chars/token ratio is close to safe for English transcripts but can underflow on dense content. Production telemetry will tell us if a per-recipe override is needed.
+
+### To take advantage of v0.30.2
+
+`gbrain upgrade` is enough — the change is purely runtime behavior, no schema migration required.
+
+If your dream queue accumulated doomed subagent jobs from a prior version:
+```bash
+gbrain jobs list --status dead --queue default | grep prompt_too_long
+gbrain jobs prune --status dead --queue default
+```
+
+If you want to verify chunking on your specific corpus before next autopilot cycle:
+```bash
+gbrain dream --phase synthesize --dry-run --json | jq '.details.skips'
+```
+
+A non-empty `skips` array means a transcript hit the 24-chunk cap or already exists at the legacy single-chunk key. Empty means everything fits.
+
+### For contributors
+
+Two-round Codex outside-voice review surfaced 12 structural risks; six folded directly into the design (D5 cap-hit no-cache, D6 orchestrator slug rewrite, D7 honest tool-loop scope, D8 legacy-key migration, D9 hash-deterministic boundaries, D10 operator-configurable cap), and the four PARTIAL items have follow-up TODOs. The plan file at `~/.claude/plans/system-instruction-you-are-working-mossy-fox.md` documents the full decision history. PR #748's contribution (boundary ladder + config-key naming + 3.5 chars/token estimator) is preserved verbatim and credited; this branch supersedes it with the structural safeguards.
+
+Tests: 27 unit cases (`test/cycle-synthesize-chunker.test.ts`, `test/subagent-prompt-too-long.test.ts`) + 4 PGLite E2E cases (`test/e2e/dream-synthesize-chunking.test.ts`) covering D5 cap hit, D8 legacy-key skip, single-chunk parity, multi-chunk fan-out shape.
+
+## [0.30.1] - 2026-05-08
+
+**Operational hardening: gbrain upgrade just works on Supabase. DDL stops timing out on the pooler. Migrations stop wedging. HNSW rebuilds stop nuking your search. Backfills stop being bespoke scripts.**
+
+Twelve releases in a weekend taught us where the cracks are: every Supabase upgrade required Garry at the keyboard. Statement timeouts on the pooler. Wedged migrations after three partial runs. 3.5-hour HNSW rebuilds. The v0.27 → v0.29.1 walk through 12 versions made the operational story unshippable. v0.30.1 fixes the substrate.
+
+### What you can now do
+
+**`gbrain backfill <kind>`** — first-class bulk operations. Three registered backfills (`effective_date`, `emotional_weight`, `embedding_voyage`) with keyset pagination, automatic checkpoint persistence in the `config` table, adaptive batch halving on statement timeout, connection-drop reconnect, and pinned-backend semantics so `SET LOCAL statement_timeout` actually persists across the BEGIN/UPDATE/COMMIT cycle. Run `gbrain backfill list` to see what's registered.
+
+```bash
+gbrain backfill effective_date
+gbrain backfill emotional_weight --concurrency 2
+gbrain backfill list
+```
+
+**`gbrain apply-migrations --force-schema` / `--force-orchestrator` / `--force`** — namespaced wedge recovery. `--force-retry vX.Y.Z` still resets a single orchestrator wedge. New flags reset whole ledgers in one shot. `--force-schema` re-runs `runMigrations()` against the current `config.version`. `--force` does both.
+
+**`gbrain doctor` zombie HNSW sweep** — on every engine connect, drops `indisvalid=false` indexes left over from crashed `CREATE INDEX CONCURRENTLY` calls. Guarded against in-progress builds via `pg_stat_activity` so it can't compete with Supabase auto-maintenance.
+
+### How it works under the hood
+
+**Connection routing** — `ConnectionManager` auto-detects Supabase via hostname `pooler.supabase.com` or port 6543. `read()` goes to the pooler (fast, 10 conns); `ddl()` and `bulk()` go to a direct connection (port 5432, 30-min statement_timeout, capped at 3 conns, `maintenance_work_mem='256MB'`). Override the direct URL with `GBRAIN_DIRECT_DATABASE_URL`. Disable the split with `GBRAIN_DISABLE_DIRECT_POOL=1` (kill-switch, falls back to single-pool legacy). Worker engines (cycle, sync) inherit kill-switch state from their parent ConnectionManager.
+
+**Migration retry + verify hooks** — every migration retries 3 times on statement_timeout (5s/15s/45s backoff), with `getIdleBlockers()` logged before each retry. On retry exhaustion, the error envelope names the most recent blocker by PID and prints the `pg_terminate_backend(<pid>)` recovery command. `Migration.verify` lets a migration declare a post-condition probe; if verify returns false on an idempotent migration, the runner re-runs it once. On non-idempotent migrations, `MigrationDriftError` requires `--skip-verify` to force.
+
+**HNSW atomic-swap rebuild** — `dropAndRebuild` builds a new index with a temp name, swaps atomically via `DROP INDEX old; ALTER INDEX temp RENAME TO old`. If the rebuild fails, the old index is intact and search keeps serving queries. No more "production-degraded silent failure" mode.
+
+**Upgrade-checkpoint primitive** — every step of `gbrain post-upgrade` (pull → install → schema → features → backfills → verify) writes to `~/.gbrain/upgrade-checkpoint.json` with a brain-identity hash (`sha256(database_url)`). Cross-brain checkpoint application is refused. Foundation for `gbrain upgrade --resume` (the CLI plumbing lands in v0.30.2).
+
+### For contributors
+
+40 substantive scope decisions across 4 review rounds (CEO + plan-eng + 2 codex outside-voice passes) before any code shipped. The plan file at `.context/v0.30.1-plan.md` documents the complete decision history including codex's 16 findings (4 plan-breaking, 8 spec-tightening, 4 minor) — every one adopted as a plan correction before implementation began. See the per-lane commits for the bisect-friendly trail:
+
+- Lane A: connection-manager foundation + X1 initSchema routing (1237 LOC)
+- Lane B: migration runner retry + verify hooks + namespaced --force flags (583 LOC)
+- Lane C: backfill primitive + registry + X4 + X5 (999 LOC)
+- Lane D: HNSW lifecycle manager + A3 atomic-swap (462 LOC)
+- Lane E: upgrade pipeline checkpoint + brain_id binding + get_health migrations (405 LOC)
+- E2E + serial quarantine: integration smoke + test-isolation hygiene (212 LOC)
+
+Test count grew by 146 (132 unit + 14 integration). Three test files quarantined to `*.serial.test.ts` because they mutate `process.env`.
+
+### Out of scope (deferred to v0.30.2)
+
+- `gbrain upgrade --resume` / `--status` CLI flags (substrate shipped + tested; CLI plumbing follows)
+- Three new doctor checks: `connection_routing`, `migration_wedge`, `hnsw_health` (substrate shipped; doctor wiring follows)
+- `BrainEngine.getHealth()` populating the new `migrations: {schema, orchestrator}` field (type contract committed; engine impls land alongside multi-column embedding)
+- Multi-column embedding schema migration (`embedding_voyage vector(1024)`) — backfill primitive already plumbs `--column` flag
+
+### To take advantage of v0.30.1
+
+`gbrain upgrade` will pull and run schema migrations automatically. v44 (`pages_emotional_weight_recomputed_at` column) lands as a metadata-only ALTER (instant on tables of any size).
+
+If you're on Supabase and want the dual-pool routing immediately:
+```bash
+# Optional explicit override (otherwise auto-derived from your pooler URL):
+export GBRAIN_DIRECT_DATABASE_URL="postgresql://postgres.<ref>:<password>@db.<ref>.supabase.co:5432/postgres"
+gbrain doctor   # verifies connection-manager mode
+```
+
+If `gbrain upgrade` ever wedges:
+```bash
+gbrain apply-migrations --force          # resets every wedged ledger
+gbrain doctor                            # confirms schema_version + zombie sweep
+```
+
 ## [0.30.0] - 2026-05-07
 
 **Calibration scorecards land. Find out if your bets are actually as good as you think.**
