@@ -32,12 +32,17 @@ fi
 
 cd "$(dirname "$0")/.."
 
-# Find all unit test files, deterministic order. Excludes test/e2e/.
+# Find all unit test files, deterministic order. Excludes test/e2e/ and
+# *.serial.test.ts (the concurrency-unsafe quarantine — those run via
+# scripts/run-serial-tests.sh after the parallel pass). Mirrors
+# scripts/run-unit-shard.sh's exclusion set; without this, serial files
+# leak module-level state across parallel shards in CI and racy
+# console.warn / fetch / mock interactions surface as flaky failures.
 # Portable: avoid `mapfile` (bash 4+) so this runs on macOS bash 3.2 too.
 FILES=()
 while IFS= read -r line; do
   FILES+=("$line")
-done < <(find test -name '*.test.ts' -not -path 'test/e2e/*' | sort)
+done < <(find test -name '*.test.ts' -not -path 'test/e2e/*' -not -name '*.serial.test.ts' | sort)
 
 if [ "${#FILES[@]}" -eq 0 ]; then
   echo "no test files found under test/" >&2

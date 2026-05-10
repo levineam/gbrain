@@ -40,3 +40,6 @@ jobs:
         run: bun run verify
       - name: Run test shard ${{ matrix.shard }}/4
         run: scripts/test-shard.sh ${{ matrix.shard }} 4
+      - name: Run *.serial.test.ts files (shard 1 only — quarantine for concurrency-unsafe state)
+        if: matrix.shard == 1
+        run: bash scripts/run-serial-tests.sh
