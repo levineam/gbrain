@@ -40,15 +40,18 @@ export const llamaServer: Recipe = {
     },
   },
   /**
-   * Probe via the OpenAI-compatible /v1/models endpoint. Honors
-   * LLAMA_SERVER_BASE_URL override; defaults to localhost:8080.
+   * Probe via the OpenAI-compatible /v1/models endpoint. Caller passes the
+   * resolved baseURL (from cfg.base_urls['llama-server'] or env), so the
+   * probe agrees with what the gateway will actually call. Falls back to
+   * env / localhost:8080 when called without an argument.
    */
-  async probe() {
-    const result = await probeLlamaServer();
+  async probe(baseURL?: string) {
+    const url = baseURL ?? process.env.LLAMA_SERVER_BASE_URL ?? 'http://localhost:8080/v1';
+    const result = await probeLlamaServer(url);
     if (!result.reachable) {
       return {
         ready: false,
-        hint: `llama-server not reachable at ${process.env.LLAMA_SERVER_BASE_URL ?? 'http://localhost:8080/v1'}. Start it with \`./llama-server --model <path> --embeddings\` or set LLAMA_SERVER_BASE_URL.`,
+        hint: `llama-server not reachable at ${url}. Start it with \`./llama-server --model <path> --embeddings\` or set LLAMA_SERVER_BASE_URL.`,
       };
     }
     if (!result.models_endpoint_valid) {

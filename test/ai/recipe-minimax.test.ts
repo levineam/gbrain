@@ -21,7 +21,7 @@ describe('recipe: minimax', () => {
     expect(r!.id).toBe('minimax');
     expect(r!.tier).toBe('openai-compat');
     expect(r!.implementation).toBe('openai-compatible');
-    expect(r!.base_url_default).toBe('https://api.minimax.chat/v1');
+    expect(r!.base_url_default).toBe('https://api.minimaxi.com/v1');
     expect(r!.auth_env?.required).toEqual(['MINIMAX_API_KEY']);
     expect(r!.auth_env?.optional).toContain('MINIMAX_GROUP_ID');
   });

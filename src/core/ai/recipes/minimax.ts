@@ -20,7 +20,7 @@ export const minimax: Recipe = {
   name: 'MiniMax (海螺AI)',
   tier: 'openai-compat',
   implementation: 'openai-compatible',
-  base_url_default: 'https://api.minimax.chat/v1',
+  base_url_default: 'https://api.minimaxi.com/v1',
   auth_env: {
     required: ['MINIMAX_API_KEY'],
     optional: ['MINIMAX_GROUP_ID'],

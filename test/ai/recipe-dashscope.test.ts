@@ -54,4 +54,18 @@ describe('recipe: dashscope', () => {
     expect(r.touchpoints.embedding!.max_batch_tokens).toBeGreaterThan(0);
     expect(r.touchpoints.embedding!.chars_per_token).toBeGreaterThan(0);
   });
+
+  test('dimsProviderOptions threads dimensions for text-embedding-v3 (Matryoshka)', async () => {
+    // Codex finding #1: DashScope text-embedding-v3 is Matryoshka 64-1024.
+    // Without `dimensions` on the wire, user-selected non-default dims are
+    // silently ignored and the provider returns its default size.
+    const { dimsProviderOptions } = await import('../../src/core/ai/dims.ts');
+    expect(dimsProviderOptions('openai-compatible', 'text-embedding-v3', 512))
+      .toEqual({ openaiCompatible: { dimensions: 512 } });
+    expect(dimsProviderOptions('openai-compatible', 'text-embedding-v3', 1024))
+      .toEqual({ openaiCompatible: { dimensions: 1024 } });
+    // text-embedding-v2 is fixed-dim; no passthrough.
+    expect(dimsProviderOptions('openai-compatible', 'text-embedding-v2', 1024))
+      .toBeUndefined();
+  });
 });

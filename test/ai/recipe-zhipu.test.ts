@@ -68,4 +68,18 @@ describe('recipe: zhipu', () => {
     expect(sql.toLowerCase()).toContain('create index');
     expect(sql.toLowerCase()).toContain('hnsw');
   });
+
+  test('dimsProviderOptions threads dimensions for embedding-3 (Matryoshka)', async () => {
+    // Codex finding #1: Zhipu embedding-3 is Matryoshka 256-2048. Without
+    // `dimensions` on the wire, user-selected non-default dims are
+    // silently ignored.
+    const { dimsProviderOptions } = await import('../../src/core/ai/dims.ts');
+    expect(dimsProviderOptions('openai-compatible', 'embedding-3', 1024))
+      .toEqual({ openaiCompatible: { dimensions: 1024 } });
+    expect(dimsProviderOptions('openai-compatible', 'embedding-3', 2048))
+      .toEqual({ openaiCompatible: { dimensions: 2048 } });
+    // embedding-2 is fixed-dim; no passthrough.
+    expect(dimsProviderOptions('openai-compatible', 'embedding-2', 1024))
+      .toBeUndefined();
+  });
 });

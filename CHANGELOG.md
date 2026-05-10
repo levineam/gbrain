@@ -73,6 +73,14 @@ For agents: every recipe is registered in the same `listRecipes()` registry, so 
 - `gbrain doctor` adds an `alternative_providers` check that surfaces recipes whose env vars are already set but aren't the configured provider.
 - `gbrain init --model litellm` (or any user_provided_models recipe) now refuses with a structured setup hint instead of throwing "no embedding models listed."
 
+#### Codex review fixes (pre-merge)
+
+- **dimsProviderOptions on openai-compatible**: text-embedding-3-* (Azure), text-embedding-v3 (DashScope), and embedding-3 (Zhipu) now thread `dimensions` to the wire. Without this, Azure-default 3072d would mismatch a 1536d brain on the first embed; DashScope/Zhipu Matryoshka requests would be silently ignored.
+- **`gbrain init --embedding-model llama-server:foo` (verbose path)**: now refuses without `--embedding-dimensions`. Pre-fix, the verbose path fell through to the gateway's 1536d default and silently created the wrong-width schema (only the shorthand `--model` was guarded).
+- **MiniMax host correction**: `api.minimax.chat` → `api.minimaxi.com` (matches MiniMax's current OpenAI-compatible docs).
+- **`LLAMA_SERVER_BASE_URL` reaches the gateway**: `buildGatewayConfig` now threads `LLAMA_SERVER_BASE_URL`, `OLLAMA_BASE_URL`, `LMSTUDIO_BASE_URL`, `LITELLM_BASE_URL` env into `cfg.base_urls` so embed traffic actually hits the configured port. Pre-fix, the env-only setup let probe pass on a custom port while traffic still hit `localhost:8080`.
+- **`Recipe.probe(baseURL?)` accepts the resolved URL**: probe and gateway can no longer disagree when only `provider_base_urls` is set in config (no env). Callers with cfg pass the URL; legacy callers fall back to env.
+
 #### Adjacent fixes
 
 - **#779 (alexandreroumieu-codeapprentice) reworked**: `EmbeddingTouchpoint.no_batch_cap?: true` opt-out for dynamic-cap recipes.

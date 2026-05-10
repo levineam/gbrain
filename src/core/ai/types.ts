@@ -223,8 +223,14 @@ export interface Recipe {
    * by the doctor's embedding probe; both wrap the call in
    * `Promise.allSettled` with a 200ms timeout so a hung local server does
    * not block the provider matrix.
+   *
+   * `baseURL`: optional resolved URL the gateway will actually call (from
+   * `cfg.base_urls[recipe.id]` or recipe defaults). Pass it so the probe
+   * checks the same endpoint as live traffic. Without it, the probe falls
+   * back to recipe defaults / env, which can disagree with config-only
+   * URL overrides (codex finding #5).
    */
-  probe?(): Promise<{ ready: boolean; hint?: string }>;
+  probe?(baseURL?: string): Promise<{ ready: boolean; hint?: string }>;
 }
 
 export interface AIGatewayConfig {

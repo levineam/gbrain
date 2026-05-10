@@ -49,9 +49,11 @@ export async function probeLMStudio(): Promise<ProbeResult> {
 /**
  * Probe llama.cpp's `llama-server --embeddings` endpoint. Defaults to port
  * 8080 (llama-server's default; distinct from Ollama's 11434 and LM Studio's
- * 1234). Override via `LLAMA_SERVER_BASE_URL`.
+ * 1234). Override via `LLAMA_SERVER_BASE_URL` env, or pass `baseURL` directly
+ * (callers with access to `cfg.base_urls['llama-server']` should pass it so
+ * probe agrees with what the gateway will actually call).
  */
-export async function probeLlamaServer(): Promise<ProbeResult> {
-  const url = process.env.LLAMA_SERVER_BASE_URL ?? 'http://localhost:8080/v1';
+export async function probeLlamaServer(baseURL?: string): Promise<ProbeResult> {
+  const url = baseURL ?? process.env.LLAMA_SERVER_BASE_URL ?? 'http://localhost:8080/v1';
   return probeOpenAICompat(url);
 }
