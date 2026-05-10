@@ -177,8 +177,11 @@ describeWhen('thin-client end-to-end (requires DATABASE_URL)', () => {
   test('sync is refused with canonical thin-client error', async () => {
     const r = await spawn(['sync'], clientHome);
     expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain('thin client');
+    // v0.31.1: refusal carries pinpoint hint format (`thin-client of <url>`
+    // with hyphen) instead of the v0.30 generic `thin client` (with space).
+    expect(r.stderr).toContain('thin-client of');
     expect(r.stderr).toContain(`http://127.0.0.1:${serverPort}/mcp`);
+    expect(r.stderr).toContain('not routable');
   });
 
   test('re-running init refuses without --force', async () => {
@@ -188,92 +191,11 @@ describeWhen('thin-client end-to-end (requires DATABASE_URL)', () => {
     expect(parsed.reason).toBe('thin_client_config_present');
   });
 
-  // ─── Tier B: gbrain remote ping + remote doctor ───
-
-  test('gbrain remote doctor returns the host DoctorReport', async () => {
-    const r = await spawn(['remote', 'doctor', '--json'], clientHome);
-    // Exit code reflects the host brain's health. On an empty fresh brain
-    // brain_score is 0, so status is 'unhealthy' and exit is 1. That's
-    // legitimate doctor output, not a transport failure. What this test
-    // pins is the round-trip + JSON shape.
-    const report = JSON.parse(r.stdout.trim());
-    expect(report.schema_version).toBe(2);
-    expect(['healthy', 'warnings', 'unhealthy']).toContain(report.status);
-    const names = report.checks.map((c: { name: string }) => c.name);
-    expect(names).toContain('connection');
-    expect(names).toContain('schema_version');
-    expect(names).toContain('brain_score');
-    expect(names).toContain('queue_health');
-    // Host is fresh + connected, so connection check is OK.
-    const conn = report.checks.find((c: { name: string; status: string }) => c.name === 'connection');
-    expect(conn.status).toBe('ok');
-    // Schema version is at LATEST_VERSION on a fresh init.
-    const sv = report.checks.find((c: { name: string; status: string }) => c.name === 'schema_version');
-    expect(sv.status).toBe('ok');
-  });
-
-  test('gbrain remote ping triggers autopilot-cycle and returns terminal state', async () => {
-    // Test budget: 60s ping wait, 120s test timeout (overhead). Empty brain
-    // with no configured repo path will likely have autopilot-cycle fail-fast
-    // in the sync phase — that's fine. What this test pins is the wire path:
-    // submit_job → get_job poll → terminal state JSON. NOT cycle success on
-    // a no-repo fixture.
-    const r = await spawn(['remote', 'ping', '--json', '--timeout', '60s'], clientHome);
-    expect(r.stdout.length).toBeGreaterThan(0);
-    const parsed = JSON.parse(r.stdout.trim());
-    expect(parsed).toHaveProperty('job_id');
-    expect(parsed.job_id).toBeGreaterThan(0);
-    // success → completed; otherwise any terminal state OR timeout is OK.
-    if (parsed.status === 'success') {
-      expect(parsed.state).toBe('completed');
-    } else {
-      expect(['failed', 'dead', 'cancelled', 'timeout']).toContain(parsed.reason ?? parsed.state);
-    }
-  });
-
-  test('client without admin scope cannot call run_doctor', async () => {
-    // Register a separate client with read+write only (no admin) and verify
-    // that gbrain remote doctor surfaces an auth-error message. This is the
-    // codex review #7 regression guard — the verification flow MUST require
-    // admin scope.
-    const reg = await spawn([
-      'auth', 'register-client', 'thin-client-readwrite',
-      '--grant-types', 'client_credentials',
-      '--scopes', 'read write',
-    ], hostHome);
-    if (reg.exitCode !== 0) throw new Error(`register-client failed: ${reg.stderr || reg.stdout}`);
-    const parsed = parseRegisterClientOutput(reg.stdout);
-    const lowScopeId = parsed.clientId;
-    const lowScopeSecret = parsed.clientSecret;
-
-    // Spin up a separate clientHome for the lower-scope client
-    const lowScopeHome = mkdtempSync(join(tmpdir(), 'gbrain-thin-client-lowscope-'));
-    try {
-      const init = await spawn([
-        'init', '--mcp-only', '--json',
-        '--issuer-url', `http://127.0.0.1:${serverPort}`,
-        '--mcp-url', `http://127.0.0.1:${serverPort}/mcp`,
-        '--oauth-client-id', lowScopeId,
-        '--oauth-client-secret', lowScopeSecret,
-      ], lowScopeHome);
-      if (init.exitCode !== 0) {
-        throw new Error(`low-scope init exit=${init.exitCode}\nstdout:${init.stdout}\nstderr:${init.stderr}`);
-      }
-      expect(init.exitCode).toBe(0);
-
-      const r = await spawn(['remote', 'doctor', '--json'], lowScopeHome);
-      expect(r.exitCode).toBe(1);
-      const err = JSON.parse(r.stdout.trim());
-      expect(err.status).toBe('error');
-      // Either the SDK 401 path or our auth_after_refresh wrap is fine —
-      // the test pins "this fails because admin scope is missing".
-      expect(['auth', 'auth_after_refresh', 'tool_error']).toContain(err.reason);
-    } finally {
-      rmSync(lowScopeHome, { recursive: true, force: true });
-    }
-  });
-
   // ─── v0.31.1 (Issue #734) — routing seam regression tests ───
+  //
+  // Run BEFORE Tier B (remote ping) because the remote-ping test runs a
+  // 60s autopilot-cycle that can leave the server in a state where
+  // subsequent OAuth probes fail. Routing tests need a healthy server.
   //
   // The bug being fixed: thin-client gbrain commands silently fell through to
   // the empty local PGLite, returned "No results." (exit 0), and never reached
@@ -374,5 +296,90 @@ describeWhen('thin-client end-to-end (requires DATABASE_URL)', () => {
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain('not routable');
     expect(r.stderr).toContain('gbrain remote ping');
+  });
+
+  // ─── Tier B: gbrain remote ping + remote doctor ───
+
+  test('gbrain remote doctor returns the host DoctorReport', async () => {
+    const r = await spawn(['remote', 'doctor', '--json'], clientHome);
+    // Exit code reflects the host brain's health. On an empty fresh brain
+    // brain_score is 0, so status is 'unhealthy' and exit is 1. That's
+    // legitimate doctor output, not a transport failure. What this test
+    // pins is the round-trip + JSON shape.
+    const report = JSON.parse(r.stdout.trim());
+    expect(report.schema_version).toBe(2);
+    expect(['healthy', 'warnings', 'unhealthy']).toContain(report.status);
+    const names = report.checks.map((c: { name: string }) => c.name);
+    expect(names).toContain('connection');
+    expect(names).toContain('schema_version');
+    expect(names).toContain('brain_score');
+    expect(names).toContain('queue_health');
+    // Host is fresh + connected, so connection check is OK.
+    const conn = report.checks.find((c: { name: string; status: string }) => c.name === 'connection');
+    expect(conn.status).toBe('ok');
+    // Schema version is at LATEST_VERSION on a fresh init.
+    const sv = report.checks.find((c: { name: string; status: string }) => c.name === 'schema_version');
+    expect(sv.status).toBe('ok');
+  });
+
+  test('gbrain remote ping triggers autopilot-cycle and returns terminal state', async () => {
+    // Test budget: 60s ping wait, 120s test timeout (overhead). Empty brain
+    // with no configured repo path will likely have autopilot-cycle fail-fast
+    // in the sync phase — that's fine. What this test pins is the wire path:
+    // submit_job → get_job poll → terminal state JSON. NOT cycle success on
+    // a no-repo fixture.
+    const r = await spawn(['remote', 'ping', '--json', '--timeout', '60s'], clientHome);
+    expect(r.stdout.length).toBeGreaterThan(0);
+    const parsed = JSON.parse(r.stdout.trim());
+    expect(parsed).toHaveProperty('job_id');
+    expect(parsed.job_id).toBeGreaterThan(0);
+    // success → completed; otherwise any terminal state OR timeout is OK.
+    if (parsed.status === 'success') {
+      expect(parsed.state).toBe('completed');
+    } else {
+      expect(['failed', 'dead', 'cancelled', 'timeout']).toContain(parsed.reason ?? parsed.state);
+    }
+  });
+
+  test('client without admin scope cannot call run_doctor', async () => {
+    // Register a separate client with read+write only (no admin) and verify
+    // that gbrain remote doctor surfaces an auth-error message. This is the
+    // codex review #7 regression guard — the verification flow MUST require
+    // admin scope.
+    const reg = await spawn([
+      'auth', 'register-client', 'thin-client-readwrite',
+      '--grant-types', 'client_credentials',
+      '--scopes', 'read write',
+    ], hostHome);
+    if (reg.exitCode !== 0) throw new Error(`register-client failed: ${reg.stderr || reg.stdout}`);
+    const parsed = parseRegisterClientOutput(reg.stdout);
+    const lowScopeId = parsed.clientId;
+    const lowScopeSecret = parsed.clientSecret;
+
+    // Spin up a separate clientHome for the lower-scope client
+    const lowScopeHome = mkdtempSync(join(tmpdir(), 'gbrain-thin-client-lowscope-'));
+    try {
+      const init = await spawn([
+        'init', '--mcp-only', '--json',
+        '--issuer-url', `http://127.0.0.1:${serverPort}`,
+        '--mcp-url', `http://127.0.0.1:${serverPort}/mcp`,
+        '--oauth-client-id', lowScopeId,
+        '--oauth-client-secret', lowScopeSecret,
+      ], lowScopeHome);
+      if (init.exitCode !== 0) {
+        throw new Error(`low-scope init exit=${init.exitCode}\nstdout:${init.stdout}\nstderr:${init.stderr}`);
+      }
+      expect(init.exitCode).toBe(0);
+
+      const r = await spawn(['remote', 'doctor', '--json'], lowScopeHome);
+      expect(r.exitCode).toBe(1);
+      const err = JSON.parse(r.stdout.trim());
+      expect(err.status).toBe('error');
+      // Either the SDK 401 path or our auth_after_refresh wrap is fine —
+      // the test pins "this fails because admin scope is missing".
+      expect(['auth', 'auth_after_refresh', 'tool_error']).toContain(err.reason);
+    } finally {
+      rmSync(lowScopeHome, { recursive: true, force: true });
+    }
   });
 });
