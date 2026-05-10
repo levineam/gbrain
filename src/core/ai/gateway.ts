@@ -111,10 +111,14 @@ export function defaultResolveAuth(
   const optional = recipe.auth_env?.optional ?? [];
 
   if (required.length === 0) {
-    // No-auth or optional-auth recipe (e.g. Ollama). Read first optional env;
-    // if none present, use 'unauthenticated' so createOpenAICompatible has
-    // something to put in Authorization (servers like Ollama ignore it).
-    const optKey = optional.find(k => !!env[k]);
+    // No-auth or optional-auth recipe (e.g. Ollama, llama-server). Read first
+    // present optional API-key env (ignoring URL-shaped names like
+    // OLLAMA_BASE_URL, which belong in cfg.base_urls, not auth). If none
+    // present, use 'unauthenticated' so createOpenAICompatible has something
+    // to put in Authorization (servers like Ollama / llama-server ignore it).
+    const optKey = optional.find(
+      k => !!env[k] && !/_(BASE_)?URL$/.test(k),
+    );
     const token = optKey ? env[optKey]! : 'unauthenticated';
     return { headerName: 'Authorization', token: `Bearer ${token}` };
   }

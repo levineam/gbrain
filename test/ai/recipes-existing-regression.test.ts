@@ -29,9 +29,9 @@ import type { Recipe } from '../../src/core/ai/types.ts';
 const TOUCHPOINTS: Array<'embedding' | 'expansion' | 'chat'> = ['embedding', 'expansion', 'chat'];
 
 describe('IRON RULE: existing 9 recipes survive the v0.32 resolveAuth refactor', () => {
-  test('the 9 expected recipes are still registered', () => {
-    const ids = listRecipes().map(r => r.id).sort();
-    expect(ids).toEqual([
+  test('all 9 baseline recipes are still registered (subset, allows post-v0.32 additions)', () => {
+    const ids = new Set(listRecipes().map(r => r.id));
+    for (const baseline of [
       'anthropic',
       'deepseek',
       'google',
@@ -41,7 +41,9 @@ describe('IRON RULE: existing 9 recipes survive the v0.32 resolveAuth refactor',
       'openai',
       'together',
       'voyage',
-    ]);
+    ]) {
+      expect(ids.has(baseline), `baseline recipe ${baseline} missing post-refactor`).toBe(true);
+    }
   });
 
   test('every recipe with a non-empty required[] returns Authorization Bearer <key>', () => {
@@ -75,17 +77,16 @@ describe('IRON RULE: existing 9 recipes survive the v0.32 resolveAuth refactor',
     }
   });
 
-  test('Ollama (empty required, optional set) reads first optional env', () => {
+  test('Ollama (empty required, OLLAMA_API_KEY set) reads it as the Bearer token', () => {
     const ollama = getRecipe('ollama');
     expect(ollama).toBeDefined();
     expect(ollama!.auth_env?.required ?? []).toEqual([]);
     const optional = ollama!.auth_env?.optional ?? [];
-    expect(optional.length).toBeGreaterThan(0);
-    // First optional present → returned as Bearer.
-    const env = { [optional[0]]: 'http://localhost:11434' };
-    const auth = defaultResolveAuth(ollama!, env, 'embedding');
+    expect(optional).toContain('OLLAMA_API_KEY');
+    // OLLAMA_API_KEY (a non-URL-shaped optional) becomes the Bearer.
+    const auth = defaultResolveAuth(ollama!, { OLLAMA_API_KEY: 'fake-token' }, 'embedding');
     expect(auth.headerName).toBe('Authorization');
-    expect(auth.token).toBe('Bearer http://localhost:11434');
+    expect(auth.token).toBe('Bearer fake-token');
   });
 
   test('Ollama (no env at all) falls back to "Bearer unauthenticated"', () => {
@@ -93,6 +94,27 @@ describe('IRON RULE: existing 9 recipes survive the v0.32 resolveAuth refactor',
     const auth = defaultResolveAuth(ollama!, {}, 'embedding');
     expect(auth.headerName).toBe('Authorization');
     expect(auth.token).toBe('Bearer unauthenticated');
+  });
+
+  test('URL-shaped optional env (OLLAMA_BASE_URL, LLAMA_SERVER_BASE_URL) does NOT become the Bearer token', () => {
+    // Regression for the v0.32 default-fallback design: optional entries
+    // ending in _URL or _BASE_URL are config (cfg.base_urls), not auth.
+    // The fallback must skip them and consult the next optional API-key entry.
+    const ollama = getRecipe('ollama');
+    const auth1 = defaultResolveAuth(
+      ollama!,
+      { OLLAMA_BASE_URL: 'http://my-ollama/v1' },
+      'embedding',
+    );
+    expect(auth1.token, 'OLLAMA_BASE_URL must not become Bearer token').toBe('Bearer unauthenticated');
+
+    // When BOTH BASE_URL and API_KEY are set, the API_KEY wins.
+    const auth2 = defaultResolveAuth(
+      ollama!,
+      { OLLAMA_BASE_URL: 'http://my-ollama/v1', OLLAMA_API_KEY: 'real-key' },
+      'embedding',
+    );
+    expect(auth2.token).toBe('Bearer real-key');
   });
 
   test('all 3 touchpoints produce identical auth for the same recipe + env', () => {
