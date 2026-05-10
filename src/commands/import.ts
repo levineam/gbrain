@@ -37,11 +37,16 @@ export interface RunImportResult {
 export async function runImport(
   engine: BrainEngine,
   args: string[],
-  opts: { commit?: string; strategy?: SyncStrategy } = {},
+  opts: { commit?: string; strategy?: SyncStrategy; sourceId?: string } = {},
 ): Promise<RunImportResult> {
   const noEmbed = args.includes('--no-embed');
   const fresh = args.includes('--fresh');
   const jsonOutput = args.includes('--json');
+  // v0.30.x follow-up to PR #707: programmatic sourceId support so internal
+  // callers (performFullSync, future Step 6 paths) can route to a named
+  // source. The CLI `gbrain import` deliberately has no --source flag per
+  // PR #707's design intent — only programmatic callers thread sourceId.
+  const sourceId = opts.sourceId;
   const workersIdx = args.indexOf('--workers');
   const workersArg = workersIdx !== -1 ? args[workersIdx + 1] : null;
   // v0.22.13 (PR #490 Q2): shared parseWorkers helper rejects bad input
@@ -135,8 +140,8 @@ export async function runImport(
       // up images when GBRAIN_EMBEDDING_MULTIMODAL=true so this branch is
       // unreachable when the gate is off; defense-in-depth check anyway.
       const result = isImageFilePath(relativePath) && process.env.GBRAIN_EMBEDDING_MULTIMODAL === 'true'
-        ? await importImageFile(eng, filePath, relativePath, { noEmbed })
-        : await importFile(eng, filePath, relativePath, { noEmbed });
+        ? await importImageFile(eng, filePath, relativePath, { noEmbed, sourceId })
+        : await importFile(eng, filePath, relativePath, { noEmbed, sourceId });
       const _fileMs = Date.now() - _fileT0;
       if (_fileMs > 5000) {
         console.error(`[gbrain phase] import.process_file slow ${_fileMs}ms ${relativePath}`);
