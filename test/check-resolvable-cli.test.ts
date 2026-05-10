@@ -366,4 +366,27 @@ describe('gbrain check-resolvable CLI — integration', () => {
     expect(r.stdout).toContain('Auto-detected skills directory');
     expect(r.stdout).toContain('/skills');
   });
+
+  // v0.31.7 D6 regression guard: --fix must refuse install-path fallback.
+  // Without this gate, `cd ~ && gbrain check-resolvable --fix` would silently
+  // mutate SKILL.md files in the bundled gbrain repo via autoFixDryViolations.
+  // Codex caught this leak in the v0.31.7 ship review.
+  it('v0.31.7 D6: --fix refuses when source is install_path', () => {
+    // Run from a guaranteed-empty tempdir so the install-path fallback fires.
+    const empty = mkdtempSync(join(tmpdir(), 'cr-fix-installpath-'));
+    try {
+      // Pass --fix; expect refusal exit + clear error message.
+      const r = spawnSync('bun', ['run', CLI, 'check-resolvable', '--fix'], {
+        cwd: empty,
+        env: { ...process.env, OPENCLAW_WORKSPACE: '', GBRAIN_SKILLS_DIR: '' },
+        encoding: 'utf-8',
+      });
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('install-path fallback');
+      expect(r.stderr).toContain('refused');
+      expect(r.stderr).toMatch(/GBRAIN_SKILLS_DIR|OPENCLAW_WORKSPACE|--skills-dir/);
+    } finally {
+      rmSync(empty, { recursive: true, force: true });
+    }
+  });
 });

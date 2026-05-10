@@ -282,6 +282,21 @@ export async function runCheckResolvable(args: string[]): Promise<void> {
 
   let autoFix: AutoFixReport | null = null;
   if (flags.fix) {
+    // SAFETY GATE (v0.31.7 follow-up to D5): refuse --fix when the skills
+    // dir came from the install-path fallback. autoFixDryViolations writes
+    // to SKILL.md files; running --fix from a directory with no resolver up
+    // the cwd tree would resolve to the bundled gbrain repo via the
+    // read-only install-path fallback and silently mutate it. Codex caught
+    // this leak in the v0.31.7 ship review (D6 lock).
+    if (source === 'install_path') {
+      process.stderr.write(
+        'gbrain check-resolvable --fix refused: skills dir resolved via install-path fallback (read-only).\n' +
+        'The --fix flag writes to SKILL.md files; running it against the bundled install\n' +
+        'tree would silently mutate gbrain itself. Set $GBRAIN_SKILLS_DIR, $OPENCLAW_WORKSPACE,\n' +
+        'or pass --skills-dir <path> to point at the workspace you actually want to fix.\n',
+      );
+      process.exit(1);
+    }
     autoFix = autoFixDryViolations(skillsDir, { dryRun: flags.dryRun });
   }
 

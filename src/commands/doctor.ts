@@ -241,9 +241,25 @@ export async function runDoctor(engine: BrainEngine | null, args: string[], dbSo
     // --fix: run auto-repair BEFORE checkResolvable so the post-fix scan
     // reflects the new state. Auto-fix only targets DRY violations today;
     // other resolver issues are left to human repair.
+    //
+    // SAFETY GATE (v0.31.7 follow-up to D5): refuse --fix when the skills
+    // dir came from the install-path fallback. autoFixDryViolations writes
+    // to SKILL.md files; a user running `cd ~ && gbrain doctor --fix`
+    // without an explicit signal would have install_path resolve to the
+    // bundled gbrain repo and silently rewrite the install-tree skills.
+    // Codex caught this leak in the v0.31.7 ship review (D6 lock).
     if (doFix) {
-      autoFixReport = autoFixDryViolations(skillsDir, { dryRun });
-      printAutoFixReport(autoFixReport, dryRun, jsonOutput);
+      if (detected.source === 'install_path') {
+        process.stderr.write(
+          'gbrain doctor --fix refused: skills dir resolved via install-path fallback (read-only).\n' +
+          'The --fix flag writes to SKILL.md files; running it against the bundled install\n' +
+          'tree would silently mutate gbrain itself. Set $GBRAIN_SKILLS_DIR, $OPENCLAW_WORKSPACE,\n' +
+          'or pass --skills-dir <path> to point at the workspace you actually want to fix.\n',
+        );
+      } else {
+        autoFixReport = autoFixDryViolations(skillsDir, { dryRun });
+        printAutoFixReport(autoFixReport, dryRun, jsonOutput);
+      }
     }
 
     const report = checkResolvable(skillsDir);
