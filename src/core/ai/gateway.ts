@@ -81,6 +81,82 @@ const DEFAULT_CHARS_PER_TOKEN = 4;
 /** Default safety factor when a recipe omits it. */
 const DEFAULT_SAFETY_FACTOR = 0.8;
 
+// ---- Unified auth resolution (D12=A) ----
+//
+// Pre-v0.32, openai-compatible auth was duplicated across instantiateEmbedding,
+// instantiateExpansion, and instantiateChat with subtle drift (embedding had a
+// `${recipe.id.toUpperCase()}_API_KEY` fallback the other two lacked). D12=A
+// unifies all three through `Recipe.resolveAuth?(env)` with a sensible default
+// so existing recipes need zero code changes; only deviating recipes (Azure
+// with `api-key:` instead of `Authorization: Bearer`) override.
+
+/**
+ * Default auth resolver: returns `{headerName: 'Authorization', token: 'Bearer
+ * <key>'}` where `<key>` is the first present env var from `auth_env.required`,
+ * falling back to the first `auth_env.optional` entry, or 'unauthenticated'
+ * for fully no-auth recipes (Ollama). Throws AIConfigError when required env
+ * is missing.
+ *
+ * `touchpoint` is included in the error message so users know which call path
+ * triggered the missing-env error.
+ */
+function defaultResolveAuth(
+  recipe: Recipe,
+  env: Record<string, string | undefined>,
+  touchpoint: 'embedding' | 'expansion' | 'chat',
+): { headerName: string; token: string } {
+  const required = recipe.auth_env?.required ?? [];
+  const optional = recipe.auth_env?.optional ?? [];
+
+  if (required.length === 0) {
+    // No-auth or optional-auth recipe (e.g. Ollama). Read first optional env;
+    // if none present, use 'unauthenticated' so createOpenAICompatible has
+    // something to put in Authorization (servers like Ollama ignore it).
+    const optKey = optional.find(k => !!env[k]);
+    const token = optKey ? env[optKey]! : 'unauthenticated';
+    return { headerName: 'Authorization', token: `Bearer ${token}` };
+  }
+
+  const key = env[required[0]];
+  if (!key) {
+    throw new AIConfigError(
+      `${recipe.name} ${touchpoint} requires ${required[0]}.`,
+      recipe.setup_hint,
+    );
+  }
+  return { headerName: 'Authorization', token: `Bearer ${key}` };
+}
+
+/**
+ * Apply the recipe's auth resolver (or default) and translate the result into
+ * `createOpenAICompatible` options. Authorization-Bearer style returns
+ * `{apiKey}` (the SDK's native path); custom-header style returns `{headers}`
+ * with NO apiKey to avoid double-auth.
+ */
+function applyResolveAuth(
+  recipe: Recipe,
+  cfg: AIGatewayConfig,
+  touchpoint: 'embedding' | 'expansion' | 'chat',
+): { apiKey?: string; headers?: Record<string, string> } {
+  const resolved = recipe.resolveAuth
+    ? recipe.resolveAuth(cfg.env)
+    : defaultResolveAuth(recipe, cfg.env, touchpoint);
+
+  // Bearer-via-Authorization: use the SDK's native apiKey path (which sets
+  // Authorization: Bearer <key> internally). Strip the 'Bearer ' prefix the
+  // resolver returned.
+  if (
+    resolved.headerName === 'Authorization' &&
+    resolved.token.startsWith('Bearer ')
+  ) {
+    return { apiKey: resolved.token.slice('Bearer '.length) };
+  }
+
+  // Custom header (Azure: api-key). Use headers; do NOT pass apiKey, or the
+  // SDK will also set Authorization and the server may reject double-auth.
+  return { headers: { [resolved.headerName]: resolved.token } };
+}
+
 /** Configure the gateway. Called by cli.ts#connectEngine. Clears cached models. */
 export function configureGateway(config: AIGatewayConfig): void {
   _config = {
@@ -220,8 +296,19 @@ export function isAvailable(touchpoint: TouchpointKind): boolean {
     // embedding from an anthropic-configured brain is unavailable regardless of auth.
     const touchpointConfig = recipe.touchpoints[touchpoint as 'embedding' | 'expansion' | 'chat'];
     if (!touchpointConfig) return false;
-    // Openai-compat recipes with empty models list (e.g. litellm template) require user-provided model
-    if (Array.isArray(touchpointConfig.models) && touchpointConfig.models.length === 0 && recipe.id === 'litellm') return false;
+    // Openai-compat recipes with empty models list require a user-provided
+    // model. Either the recipe explicitly opts in via
+    // EmbeddingTouchpoint.user_provided_models (D8=A), or the legacy
+    // `recipe.id === 'litellm'` heuristic (back-compat for pre-v0.32 builds
+    // where the field hadn't been declared yet).
+    const isUserProvided =
+      touchpoint === 'embedding' &&
+      (touchpointConfig as any).user_provided_models === true;
+    if (
+      Array.isArray(touchpointConfig.models) &&
+      touchpointConfig.models.length === 0 &&
+      (recipe.id === 'litellm' || isUserProvided)
+    ) return false;
 
     // For openai-compatible without auth requirements (Ollama local), treat as always-available.
     const required = recipe.auth_env?.required ?? [];
@@ -283,20 +370,12 @@ function instantiateEmbedding(recipe: Recipe, modelId: string, cfg: AIGatewayCon
         `${recipe.name} requires a base URL.`,
         recipe.setup_hint,
       );
-      // For openai-compatible, auth is optional (ollama local) but pass a dummy key if unauthenticated.
-      const apiKey = recipe.auth_env?.required[0]
-        ? cfg.env[recipe.auth_env.required[0]]
-        : (cfg.env[`${recipe.id.toUpperCase()}_API_KEY`] ?? 'unauthenticated');
-      if (recipe.auth_env?.required.length && !apiKey) {
-        throw new AIConfigError(
-          `${recipe.name} requires ${recipe.auth_env.required[0]}.`,
-          recipe.setup_hint,
-        );
-      }
+      // D12=A: unified auth via Recipe.resolveAuth (or default).
+      const auth = applyResolveAuth(recipe, cfg, 'embedding');
       const client = createOpenAICompatible({
         name: recipe.id,
         baseURL: baseUrl,
-        apiKey: apiKey ?? 'unauthenticated',
+        ...auth,
       });
       return client.textEmbeddingModel(modelId);
     }
@@ -728,13 +807,12 @@ function instantiateExpansion(recipe: Recipe, modelId: string, cfg: AIGatewayCon
     case 'openai-compatible': {
       const baseUrl = cfg.base_urls?.[recipe.id] ?? recipe.base_url_default;
       if (!baseUrl) throw new AIConfigError(`${recipe.name} requires a base URL.`, recipe.setup_hint);
-      const apiKey = recipe.auth_env?.required[0]
-        ? cfg.env[recipe.auth_env.required[0]]
-        : 'unauthenticated';
+      // D12=A: unified auth via Recipe.resolveAuth (or default).
+      const auth = applyResolveAuth(recipe, cfg, 'expansion');
       return createOpenAICompatible({
         name: recipe.id,
         baseURL: baseUrl,
-        apiKey: apiKey ?? 'unauthenticated',
+        ...auth,
       }).languageModel(modelId);
     }
   }
@@ -931,15 +1009,12 @@ function instantiateChat(recipe: Recipe, modelId: string, cfg: AIGatewayConfig):
     case 'openai-compatible': {
       const baseUrl = cfg.base_urls?.[recipe.id] ?? recipe.base_url_default;
       if (!baseUrl) throw new AIConfigError(`${recipe.name} requires a base URL.`, recipe.setup_hint);
-      const required = recipe.auth_env?.required ?? [];
-      const apiKey = required[0] ? cfg.env[required[0]] : 'unauthenticated';
-      if (required.length > 0 && !apiKey) {
-        throw new AIConfigError(`${recipe.name} requires ${required[0]}.`, recipe.setup_hint);
-      }
+      // D12=A: unified auth via Recipe.resolveAuth (or default).
+      const auth = applyResolveAuth(recipe, cfg, 'chat');
       return createOpenAICompatible({
         name: recipe.id,
         baseURL: baseUrl,
-        apiKey: apiKey ?? 'unauthenticated',
+        ...auth,
       }).languageModel(modelId);
     }
     default:
