@@ -1116,6 +1116,15 @@ async function handleCliOnly(command: string, args: string[]) {
 // but not the other previously required remembering to mirror the change;
 // the helper makes that structural.
 function buildGatewayConfig(c: GBrainConfig): AIGatewayConfig {
+  // v0.32 (#121 reworked): when ~/.gbrain/config.json declares
+  // openai_api_key / anthropic_api_key, fold them into the gateway env so
+  // recipes that read OPENAI_API_KEY / ANTHROPIC_API_KEY find them. Process
+  // env still wins (it's loaded last) — this is a fallback for daemons /
+  // launchd-spawned subprocesses that don't propagate ~/.zshrc-sourced keys.
+  const envFromConfig: Record<string, string> = {};
+  if (c.openai_api_key) envFromConfig.OPENAI_API_KEY = c.openai_api_key;
+  if (c.anthropic_api_key) envFromConfig.ANTHROPIC_API_KEY = c.anthropic_api_key;
+
   return {
     embedding_model: c.embedding_model,
     embedding_dimensions: c.embedding_dimensions,
@@ -1124,7 +1133,7 @@ function buildGatewayConfig(c: GBrainConfig): AIGatewayConfig {
     chat_model: c.chat_model,
     chat_fallback_chain: c.chat_fallback_chain,
     base_urls: c.provider_base_urls,
-    env: { ...process.env },
+    env: { ...envFromConfig, ...process.env }, // process.env wins
   };
 }
 

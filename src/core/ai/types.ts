@@ -86,6 +86,19 @@ export interface EmbeddingTouchpoint {
    *    for shorthand `--model <provider>` and prints a setup hint.
    */
   user_provided_models?: true;
+  /**
+   * v0.32 (#779 reworked): explicit opt-out of the missing-max_batch_tokens
+   * startup warning. Set to `true` for recipes whose batch capacity is
+   * genuinely dynamic (Ollama: depends on user-loaded model; LiteLLM proxy:
+   * depends on backend; llama.cpp: depends on `--ctx-size` at server launch).
+   *
+   * Without this flag, missing `max_batch_tokens` triggers a once-per-process
+   * stderr warning so future recipes that forget the cap (and would
+   * silently rely on recursive-halving) don't ship un-noticed. Recipes that
+   * declare `no_batch_cap: true` are explicitly opting out — the warning is
+   * noise for them.
+   */
+  no_batch_cap?: true;
 }
 
 /**

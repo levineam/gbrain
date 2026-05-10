@@ -33,7 +33,10 @@ export const llamaServer: Recipe = {
       user_provided_models: true,
       default_dims: 0, // forces explicit --embedding-dimensions
       cost_per_1m_tokens_usd: 0,
-      price_last_verified: '2026-05-09',
+      price_last_verified: '2026-05-10',
+      // llama-server's batch capacity is set by `--ctx-size` at launch
+      // time; no static cap to declare. v0.32 (#779).
+      no_batch_cap: true,
     },
   },
   /**

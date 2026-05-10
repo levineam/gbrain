@@ -234,6 +234,10 @@ function warnRecipesMissingBatchTokens(): void {
     // recipe; suppress the warning for it. Every other recipe missing the
     // field is suspicious.
     if (recipe.id === 'openai') continue;
+    // v0.32 (#779): explicit opt-out for dynamic-cap recipes (Ollama,
+    // LiteLLM proxy, llama-server) — they ship without a static cap because
+    // the cap depends on a user-launched server. Warning is noise for them.
+    if (embedding.no_batch_cap === true) continue;
     if (_warnedRecipes.has(recipe.id)) continue;
     _warnedRecipes.add(recipe.id);
     // eslint-disable-next-line no-console
