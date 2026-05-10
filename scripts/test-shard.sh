@@ -32,12 +32,21 @@ fi
 
 cd "$(dirname "$0")/.."
 
-# Find all unit test files, deterministic order. Excludes test/e2e/.
+# Find all unit test files, deterministic order. Excludes:
+#   - test/e2e/*           (runs separately via scripts/run-e2e.sh)
+#   - *.serial.test.ts     (concurrency-unsafe; runs via scripts/run-serial-tests.sh)
+#   - *.slow.test.ts       (cold-path correctness; runs via scripts/run-slow-tests.sh)
+#
+# Mirrors the exclusion in scripts/run-unit-shard.sh (the local fast-loop
+# helper). Without these exclusions, mock.module() in *.serial.test.ts files
+# leaks across the shard's bun process and breaks downstream tests — exactly
+# the failure mode CLAUDE.md test isolation rules call out for the .serial
+# quarantine. Honors the same quarantine in CI as locally.
 # Portable: avoid `mapfile` (bash 4+) so this runs on macOS bash 3.2 too.
 FILES=()
 while IFS= read -r line; do
   FILES+=("$line")
-done < <(find test -name '*.test.ts' -not -path 'test/e2e/*' | sort)
+done < <(find test -name '*.test.ts' -not -path 'test/e2e/*' -not -name '*.serial.test.ts' -not -name '*.slow.test.ts' | sort)
 
 if [ "${#FILES[@]}" -eq 0 ]; then
   echo "no test files found under test/" >&2
