@@ -2,13 +2,13 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.31.2] - 2026-05-09
+## [0.31.1.1-fixwave] - 2026-05-09
 
 **Security upgrade priority: closes an authorization-code scope-escalation in `gbrain serve --http`. Plus 18 community fix-wave PRs covering upgrade-path correctness, multi-source sync, takes-fence privacy, dream cycle reliability, and CLI hygiene.**
 
-This wave was assembled as v0.31.2 against master at v0.30.2; master then advanced through v0.31.0 (hot-memory facts) and v0.31.1 (thin-client mode) before the wave merged. The version slot bumped to v0.31.2 to stay strictly monotonic. Wave content unchanged.
+Versioned as `0.31.1.1-fixwave` to communicate intent: this is a fix wave on top of v0.31.1, not a new minor or patch slot. The next regular release slot (v0.31.2) stays free for in-flight feature work. Originally assembled as v0.30.3 against master at v0.30.2; master then advanced through v0.31.0 (hot-memory facts) and v0.31.1 (thin-client mode) before merge. Wave content unchanged across the rebase.
 
-49 community PRs accumulated since v0.28. v0.31.2 lands the highest-leverage fix wave: 19 PRs across 5 lanes, single PR, atomic per-PR commits for full bisect granularity. The headline is a real security fix: any OAuth client with a `read` scope could mint an authorization code asking for `admin` and the code landed in the database ungated. v0.31.2 closes that.
+49 community PRs accumulated since v0.28. This fix wave lands the highest-leverage subset: 19 PRs across 5 lanes, single PR, atomic per-PR commits for full bisect granularity. The headline is a real security fix: any OAuth client with a `read` scope could mint an authorization code asking for `admin` and the code landed in the database ungated. The fix wave closes that.
 
 ### Upgrade priority — auth-code scope-escalation (#727)
 
@@ -39,7 +39,7 @@ If you run `gbrain serve --http` with OAuth, **upgrade now**. The pre-fix `autho
 - **Dream cycle slug lookup** survives double-encoded jsonb in `subagent_tool_executions.input`. The orchestrator no longer silently writes nothing on the "queue green, brain empty" failure mode. ([#745](https://github.com/garrytan/gbrain/pull/745), [@joelwp](https://github.com/joelwp))
 - **Voyage embedding adapter** translates between the OpenAI-compat SDK shape and Voyage's actual contract for `encoding_format`. ([#735](https://github.com/garrytan/gbrain/pull/735), [@Freddy-Cach](https://github.com/Freddy-Cach))
 
-### To take advantage of v0.31.2
+### To take advantage of v0.31.1.1-fixwave
 
 ```bash
 gbrain upgrade
@@ -71,7 +71,7 @@ If you run `gbrain serve --http` with OAuth, your existing tokens stay valid. Ne
 
 ### For contributors
 
-The v0.31.2 wave shipped after three review passes: CEO scope review (`/plan-ceo-review`), engineering review (`/plan-eng-review`), and codex outside-voice (`/codex`). The codex pass surfaced 9 findings prior reviews missed — most importantly that #727 was misclassified as RFC polish when it's a real auth-code scope-escalation, and that the original commit-shape plan (lane-squashes via `git reset --soft`) would have degraded `git blame` provenance. All 9 codex findings were resolved as decisions C1-C9 in the approved plan; #727 was reclassified to Lane 1 P0 and the wave shipped as 22+ atomic per-PR commits.
+The v0.31.1.1-fixwave wave shipped after three review passes: CEO scope review (`/plan-ceo-review`), engineering review (`/plan-eng-review`), and codex outside-voice (`/codex`). The codex pass surfaced 9 findings prior reviews missed — most importantly that #727 was misclassified as RFC polish when it's a real auth-code scope-escalation, and that the original commit-shape plan (lane-squashes via `git reset --soft`) would have degraded `git blame` provenance. All 9 codex findings were resolved as decisions C1-C9 in the approved plan; #727 was reclassified to Lane 1 P0 and the wave shipped as 22+ atomic per-PR commits.
 
 The wave was assembled by cherry-picking each PR onto a wave branch, resolving conflicts where master had moved on (the bootstrap chain, the `auth.ts` JSONB-writes seam, the `extract.ts` slug normalization × multi-source sourceId interaction, and the dream-cycle synthesize.ts query merge). Three companion commits patch test expectations or RESOLVER frontmatter declarations that the cherry-picks needed but didn't ship: a `frontmatter` + `check-resolvable` `CLI_ONLY_SELF_HELP` extension (companion to #634), a `discoverTranscripts` test update for `.md` support (companion to #708), and missing RESOLVER trigger declarations in 6 skill frontmatters (companion to #718).
 
