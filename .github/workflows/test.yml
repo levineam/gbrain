@@ -40,10 +40,9 @@ jobs:
         run: bun run verify
       - name: Run test shard ${{ matrix.shard }}/4
         run: scripts/test-shard.sh ${{ matrix.shard }} 4
-      # Serial tests must NOT run inside the parallel shard process —
-      # they use top-level mock.module(...) which leaks across files in
-      # the same Bun process. Run them on shard 1 (the only matrix slot
-      # that already does extra setup work) with --max-concurrency=1.
-      - name: Run *.serial.test.ts files (shard 1 only — concurrency-unsafe)
+      - name: Run *.serial.test.ts at --max-concurrency=1 (shard 1 only)
+        # Serial files share file-wide state (top-level mock.module, module
+        # singletons) that leaks across files in the same bun-test process.
+        # test-shard.sh excludes them; this step runs them at concurrency=1.
         if: matrix.shard == 1
-        run: scripts/run-serial-tests.sh
+        run: bun run test:serial
