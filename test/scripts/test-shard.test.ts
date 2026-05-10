@@ -3,8 +3,9 @@
  * MUST exclude *.serial.test.ts and *.slow.test.ts files, mirroring the
  * exclusion in scripts/run-unit-shard.sh (the local fast-loop equivalent).
  *
- * Why this regression test exists: serial files use `mock.module()` which
- * leaks across files in the same `bun test` process. When test-shard.sh
+ * Why this regression test exists: serial files use bun's module-mocking
+ * primitive which leaks across files in the same `bun test` process. When
+ * test-shard.sh
  * included serial files alongside other tests in the same shard, mocks from
  * eval-takes-quality-runner.serial.test.ts leaked into voyage-multimodal.test.ts
  * and broke 18 of its 22 tests in CI shard 2 — even though local runs (which
