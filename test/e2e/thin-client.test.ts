@@ -204,13 +204,13 @@ describeWhen('thin-client end-to-end (requires DATABASE_URL)', () => {
 
   test('issue #734 regression: gbrain search routes to host and returns seeded rows', async () => {
     // Seed two pages on the host via direct `gbrain put` (host has the engine).
-    // Both contain the unique token "wintermute_routing_proof" so we can grep
+    // Both contain the unique token "host_routing_proof" so we can grep
     // the response body to prove it came from the remote brain.
     const seed1 = await spawn([
       'put', 'wiki/test/routing-proof-1',
       '--type', 'note',
       '--title', 'Routing Proof Page One',
-      '--content', '# Routing Proof One\n\nUnique token: wintermute_routing_proof. This page only exists on the host.',
+      '--content', '# Routing Proof One\n\nUnique token: host_routing_proof. This page only exists on the host.',
     ], hostHome);
     if (seed1.exitCode !== 0) throw new Error(`seed1 put failed: ${seed1.stderr || seed1.stdout}`);
 
@@ -218,14 +218,14 @@ describeWhen('thin-client end-to-end (requires DATABASE_URL)', () => {
       'put', 'wiki/test/routing-proof-2',
       '--type', 'note',
       '--title', 'Routing Proof Page Two',
-      '--content', '# Routing Proof Two\n\nAnother page with wintermute_routing_proof.',
+      '--content', '# Routing Proof Two\n\nAnother page with host_routing_proof.',
     ], hostHome);
     if (seed2.exitCode !== 0) throw new Error(`seed2 put failed: ${seed2.stderr || seed2.stdout}`);
 
     // Now run search from the THIN CLIENT. Pre-v0.31.1 this returned
     // "No results." against the empty local PGLite. v0.31.1 routes via MCP
     // and must return at least one row referencing the seeded slug.
-    const r = await spawn(['search', 'wintermute_routing_proof'], clientHome);
+    const r = await spawn(['search', 'host_routing_proof'], clientHome);
 
     // Hard-fail conditions that pin the bug fix:
     expect(r.exitCode).toBe(0);
@@ -240,7 +240,7 @@ describeWhen('thin-client end-to-end (requires DATABASE_URL)', () => {
   test('routed search emits identity banner on stderr (cherry-pick B)', async () => {
     // Run search with stderr captured. Banner is suppressed in non-TTY by
     // default per our suppression rules; opt back in with GBRAIN_BANNER=1.
-    const r = await spawn(['search', 'wintermute_routing_proof'], clientHome, {
+    const r = await spawn(['search', 'host_routing_proof'], clientHome, {
       GBRAIN_BANNER: '1',
     });
     expect(r.exitCode).toBe(0);
@@ -252,7 +252,7 @@ describeWhen('thin-client end-to-end (requires DATABASE_URL)', () => {
 
   test('--quiet suppresses banner even with GBRAIN_BANNER=1', async () => {
     // --quiet wins over GBRAIN_BANNER=1. Belt-and-suspenders for shell pipelines.
-    const r = await spawn(['--quiet', 'search', 'wintermute_routing_proof'], clientHome, {
+    const r = await spawn(['--quiet', 'search', 'host_routing_proof'], clientHome, {
       GBRAIN_BANNER: '1',
     });
     expect(r.exitCode).toBe(0);

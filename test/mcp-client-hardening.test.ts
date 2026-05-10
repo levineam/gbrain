@@ -22,7 +22,7 @@ import {
   type CallRemoteToolOptions,
 } from '../src/core/mcp-client.ts';
 
-const MCP_URL = 'https://wintermute.fly.dev/mcp';
+const MCP_URL = 'https://brain-host.example/mcp';
 
 describe('toRemoteMcpError', () => {
   test('passes through existing RemoteMcpError unchanged', () => {
