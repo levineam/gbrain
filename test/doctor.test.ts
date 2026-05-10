@@ -174,4 +174,21 @@ describe('doctor command', () => {
     // Recovery command names the migration version explicitly.
     expect(block).toContain('--force-retry 35');
   });
+
+  // v0.31.7 IRON-RULE regression test for #376 + #536.
+  // The graph_coverage WARN message used to suggest stale verbs (`gbrain
+  // link-extract` / `gbrain timeline-extract`) that were removed in v0.16
+  // when extraction was consolidated into `gbrain extract <links|timeline|all>`.
+  // PR #376 (FUSED-ID) flagged the stale hint; PR #536 (mayazbay) replaced it
+  // with the canonical `gbrain extract all`. Pin the user-facing copy so a
+  // future edit can't silently re-regress to a stale verb.
+  test('graph_coverage hint uses canonical `gbrain extract all`, not removed verbs', async () => {
+    const fs = await import('fs');
+    const src = fs.readFileSync('src/commands/doctor.ts', 'utf8');
+    // Canonical form (post-v0.16 single-verb consolidation).
+    expect(src).toContain('Run: gbrain extract all');
+    // Stale verb names removed in v0.16 must not return.
+    expect(src).not.toContain('gbrain link-extract');
+    expect(src).not.toContain('gbrain timeline-extract');
+  });
 });
