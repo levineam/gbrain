@@ -182,6 +182,24 @@ export interface Recipe {
     token: string;
   };
   /**
+   * v0.32: templated openai-compatible config for recipes whose URL shape
+   * doesn't fit a static `base_url_default`. Returns the resolved baseURL
+   * and an optional fetch wrapper for cases like Azure OpenAI that need a
+   * query parameter (?api-version=) injected on every request.
+   *
+   * Default behavior (when undefined): use `base_urls[recipe.id]` from
+   * config or `recipe.base_url_default`. Throws `AIConfigError` when both
+   * are missing.
+   *
+   * Currently only Azure OpenAI overrides this — the URL is templated
+   * from `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_DEPLOYMENT` and the fetch
+   * wrapper splices `api-version` into every request URL.
+   */
+  resolveOpenAICompatConfig?(env: Record<string, string | undefined>): {
+    baseURL: string;
+    fetch?: typeof fetch;
+  };
+  /**
    * v0.32 (D13=A): optional runtime readiness check for local-server
    * recipes (ollama, llama-server, future lmstudio-recipe). Returns
    * `ready: false` when the local endpoint isn't reachable, with a `hint`

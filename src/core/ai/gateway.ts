@@ -165,6 +165,32 @@ export function applyResolveAuth(
   return { headers: { [resolved.headerName]: resolved.token } };
 }
 
+/**
+ * Resolve the openai-compatible URL + optional fetch wrapper. Defaults to
+ * `cfg.base_urls?.[recipe.id] ?? recipe.base_url_default` (the pre-v0.32
+ * behavior). Recipes whose URL is env-templated (Azure: needs endpoint +
+ * deployment + api-version) override `recipe.resolveOpenAICompatConfig` to
+ * build the URL and inject custom fetch behavior.
+ *
+ * @internal exported for tests.
+ */
+export function applyOpenAICompatConfig(
+  recipe: Recipe,
+  cfg: AIGatewayConfig,
+): { baseURL: string; fetch?: typeof fetch } {
+  if (recipe.resolveOpenAICompatConfig) {
+    return recipe.resolveOpenAICompatConfig(cfg.env);
+  }
+  const baseURL = cfg.base_urls?.[recipe.id] ?? recipe.base_url_default;
+  if (!baseURL) {
+    throw new AIConfigError(
+      `${recipe.name} requires a base URL.`,
+      recipe.setup_hint,
+    );
+  }
+  return { baseURL };
+}
+
 /** Configure the gateway. Called by cli.ts#connectEngine. Clears cached models. */
 export function configureGateway(config: AIGatewayConfig): void {
   _config = {
@@ -373,16 +399,14 @@ function instantiateEmbedding(recipe: Recipe, modelId: string, cfg: AIGatewayCon
         `Anthropic has no embedding model. Use openai or google for embeddings.`,
       );
     case 'openai-compatible': {
-      const baseUrl = cfg.base_urls?.[recipe.id] ?? recipe.base_url_default;
-      if (!baseUrl) throw new AIConfigError(
-        `${recipe.name} requires a base URL.`,
-        recipe.setup_hint,
-      );
       // D12=A: unified auth via Recipe.resolveAuth (or default).
       const auth = applyResolveAuth(recipe, cfg, 'embedding');
+      // v0.32: env-templated base URL + optional fetch wrapper for Azure.
+      const compat = applyOpenAICompatConfig(recipe, cfg);
       const client = createOpenAICompatible({
         name: recipe.id,
-        baseURL: baseUrl,
+        baseURL: compat.baseURL,
+        ...(compat.fetch ? { fetch: compat.fetch } : {}),
         ...auth,
       });
       return client.textEmbeddingModel(modelId);
@@ -813,13 +837,14 @@ function instantiateExpansion(recipe: Recipe, modelId: string, cfg: AIGatewayCon
       return createAnthropic({ apiKey }).languageModel(modelId);
     }
     case 'openai-compatible': {
-      const baseUrl = cfg.base_urls?.[recipe.id] ?? recipe.base_url_default;
-      if (!baseUrl) throw new AIConfigError(`${recipe.name} requires a base URL.`, recipe.setup_hint);
       // D12=A: unified auth via Recipe.resolveAuth (or default).
       const auth = applyResolveAuth(recipe, cfg, 'expansion');
+      // v0.32: env-templated base URL + optional fetch wrapper.
+      const compat = applyOpenAICompatConfig(recipe, cfg);
       return createOpenAICompatible({
         name: recipe.id,
-        baseURL: baseUrl,
+        baseURL: compat.baseURL,
+        ...(compat.fetch ? { fetch: compat.fetch } : {}),
         ...auth,
       }).languageModel(modelId);
     }
@@ -1015,13 +1040,14 @@ function instantiateChat(recipe: Recipe, modelId: string, cfg: AIGatewayConfig):
       return createAnthropic({ apiKey }).languageModel(modelId);
     }
     case 'openai-compatible': {
-      const baseUrl = cfg.base_urls?.[recipe.id] ?? recipe.base_url_default;
-      if (!baseUrl) throw new AIConfigError(`${recipe.name} requires a base URL.`, recipe.setup_hint);
       // D12=A: unified auth via Recipe.resolveAuth (or default).
       const auth = applyResolveAuth(recipe, cfg, 'chat');
+      // v0.32: env-templated base URL + optional fetch wrapper.
+      const compat = applyOpenAICompatConfig(recipe, cfg);
       return createOpenAICompatible({
         name: recipe.id,
-        baseURL: baseUrl,
+        baseURL: compat.baseURL,
+        ...(compat.fetch ? { fetch: compat.fetch } : {}),
         ...auth,
       }).languageModel(modelId);
     }
