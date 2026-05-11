@@ -266,16 +266,30 @@ describe('BrainRegistry — lazy init', () => {
   });
 
   test('empty/null/undefined id routes to host', async () => {
-    // We can't actually call getBrain('') without a host config, so we just
-    // verify the routing logic by observing the default-branch path. This
-    // test proves the fall-through to HOST_BRAIN_ID happens before any
-    // lookup, not that host init actually succeeds.
+    // Routing-only assertion: empty/null/undefined → tries to init the host
+    // brain (which may succeed or fail in the dev env depending on whether
+    // `~/.gbrain/config.json` exists). What we're proving is that the call
+    // does NOT throw UnknownBrainError — that error would mean the routing
+    // looked up `''` / `null` / `undefined` as a brain id, which is exactly
+    // the bug class this test guards against.
+    //
+    // On a dev box with a configured host brain, the calls resolve (no
+    // throw). On a clean CI worker, the calls reject with a config error.
+    // Either way: NOT UnknownBrainError.
     const reg = new BrainRegistry([]);
-    // Expect the host-init path to be attempted (it'll fail on missing
-    // ~/.gbrain/config.json in test env, but the error will come from
-    // initHostBrain, not UnknownBrainError — proving routing hit host).
-    await expect(reg.getBrain(null)).rejects.not.toBeInstanceOf(UnknownBrainError);
-    await expect(reg.getBrain(undefined)).rejects.not.toBeInstanceOf(UnknownBrainError);
-    await expect(reg.getBrain('')).rejects.not.toBeInstanceOf(UnknownBrainError);
+
+    const expectNotUnknownBrain = async (call: () => Promise<unknown>) => {
+      try {
+        await call();
+        // Resolved cleanly — the host brain was reachable. That proves
+        // routing went to host, not to an explicit-id lookup.
+      } catch (err) {
+        expect(err).not.toBeInstanceOf(UnknownBrainError);
+      }
+    };
+
+    await expectNotUnknownBrain(() => reg.getBrain(null));
+    await expectNotUnknownBrain(() => reg.getBrain(undefined));
+    await expectNotUnknownBrain(() => reg.getBrain(''));
   });
 });
