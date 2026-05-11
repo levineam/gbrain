@@ -228,7 +228,7 @@ export async function writeFactsToFence(
         source_session: facts[i].sessionId,
       }));
 
-      const result = await engine.insertFacts(enriched, { source_id: target.sourceId });
+      const result = await engine.insertFacts(enriched, { source_id: target.sourceId }); // gbrain-allow-direct-insert: writeFactsToFence is the markdown-first reconcile path; runs only after the atomic fence write commits
       return { inserted: result.inserted, ids: result.ids };
     },
     { timeoutMs: 5_000 },

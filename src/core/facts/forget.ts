@@ -109,7 +109,7 @@ export async function forgetFactInFence(
 
   if (!canFence) {
     // Legacy path — DB-only forget. Doesn't survive `gbrain rebuild`.
-    const ok = await engine.expireFact(factId);
+    const ok = await engine.expireFact(factId); // gbrain-allow-direct-insert: legacy fallback path inside forgetFactInFence — fence rewrite not possible (pre-v51 row / missing local_path / file deleted / row_num drift)
     return { ok, path: 'legacy_db', reason };
   }
 
@@ -120,7 +120,7 @@ export async function forgetFactInFence(
   );
   const localPath = sources[0]?.local_path ?? null;
   if (!localPath) {
-    const ok = await engine.expireFact(factId);
+    const ok = await engine.expireFact(factId); // gbrain-allow-direct-insert: legacy fallback path inside forgetFactInFence — fence rewrite not possible (pre-v51 row / missing local_path / file deleted / row_num drift)
     return { ok, path: 'legacy_db', reason };
   }
 
@@ -133,7 +133,7 @@ export async function forgetFactInFence(
     // File deleted out from under us — only the DB has the row.
     // Legacy path is the safe behavior; the operator can fix the
     // tree mismatch separately.
-    const ok = await engine.expireFact(factId);
+    const ok = await engine.expireFact(factId); // gbrain-allow-direct-insert: legacy fallback path inside forgetFactInFence — fence rewrite not possible (pre-v51 row / missing local_path / file deleted / row_num drift)
     return { ok, path: 'legacy_db', reason };
   }
 
@@ -147,7 +147,7 @@ export async function forgetFactInFence(
       // Fence is missing the row — DB drifted from markdown. Fall
       // through to legacy expire so the user's intent succeeds; doctor
       // surfaces the drift separately.
-      const ok = await engine.expireFact(factId);
+      const ok = await engine.expireFact(factId); // gbrain-allow-direct-insert: legacy fallback path inside forgetFactInFence — fence rewrite not possible (pre-v51 row / missing local_path / file deleted / row_num drift)
       return { ok, path: 'legacy_db', reason };
     }
 
@@ -179,7 +179,7 @@ export async function forgetFactInFence(
     if (begin === -1 || end === -1) {
       // Race / corruption: fence disappeared between parse and render.
       // Legacy fallback.
-      const ok = await engine.expireFact(factId);
+      const ok = await engine.expireFact(factId); // gbrain-allow-direct-insert: legacy fallback path inside forgetFactInFence — fence rewrite not possible (pre-v51 row / missing local_path / file deleted / row_num drift)
       return { ok, path: 'legacy_db', reason };
     }
     const newBody = body.slice(0, begin) + newFence + body.slice(end + '<!--- gbrain:facts:end -->'.length);
@@ -190,7 +190,7 @@ export async function forgetFactInFence(
     if (validate.warnings.length > 0) {
       // Quarantine .tmp; leave the canonical file alone; fall back to
       // DB expire so the user's forget intent still succeeds.
-      const ok = await engine.expireFact(factId);
+      const ok = await engine.expireFact(factId); // gbrain-allow-direct-insert: legacy fallback path inside forgetFactInFence — fence rewrite not possible (pre-v51 row / missing local_path / file deleted / row_num drift)
       return { ok, path: 'legacy_db', reason };
     }
     renameSync(tmpPath, filePath);

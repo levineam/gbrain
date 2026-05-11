@@ -137,7 +137,7 @@ export async function runExtractFacts(
     if (parsed.facts.length === 0) continue;
 
     const extracted = extractFactsFromFenceText(parsed.facts, slug, sourceId);
-    const inserted = await engine.insertFacts(extracted, { source_id: sourceId });
+    const inserted = await engine.insertFacts(extracted, { source_id: sourceId }); // gbrain-allow-direct-insert: extract_facts cycle phase reconciles fence → DB
     result.factsInserted += inserted.inserted;
   }
 

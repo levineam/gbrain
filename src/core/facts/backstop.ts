@@ -410,7 +410,7 @@ async function runPipelineWithBody(
       confidence: f.confidence,
       embedding: f.embedding ?? null,
     };
-    const result = await ctx.engine.insertFact(newFact, { source_id: ctx.sourceId });
+    const result = await ctx.engine.insertFact(newFact, { source_id: ctx.sourceId }); // gbrain-allow-direct-insert: legacy DB-only fallback for unparented / thin-client facts (no entity page to fence onto)
     fact_ids.push(result.id);
     if (result.status === 'inserted') inserted += 1;
     else if ((result.status as FactInsertStatus) === 'duplicate') duplicate += 1;
