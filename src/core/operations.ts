@@ -27,6 +27,10 @@ import {
   LIST_PAGES_DESCRIPTION,
   QUERY_DESCRIPTION,
   SEARCH_DESCRIPTION,
+  CODE_CALLERS_DESCRIPTION,
+  CODE_CALLEES_DESCRIPTION,
+  CODE_DEF_DESCRIPTION,
+  CODE_REFS_DESCRIPTION,
 } from './operations-descriptions.ts';
 
 // --- Types ---
@@ -2644,6 +2648,122 @@ function parseSinceParam(raw: unknown): Date | null {
   return null;
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// v0.34 Cathedral III — code-intelligence ops (MCP-exposed).
+//
+// Pre-v0.34 code-callers / code-callees / code-def / code-refs lived only in
+// the CLI_ONLY set at cli.ts:30 — agents calling gbrain via MCP couldn't reach
+// them and fell through to text search. These wrappers expose the existing
+// engine + library functions to the MCP surface with resolver-grade
+// descriptions (operations-descriptions.ts) so agents route to them
+// automatically during plan-mode.
+//
+// All four are scope:'read'. Source-scoped via ctx.sourceId when set.
+// Both `source_id` and `all_sources` are params so per-call overrides work.
+// ──────────────────────────────────────────────────────────────────────────────
+
+const code_callers: Operation = {
+  name: 'code_callers',
+  description: CODE_CALLERS_DESCRIPTION,
+  params: {
+    symbol: { type: 'string', required: true, description: 'Symbol to find callers of (bare or qualified name).' },
+    limit: { type: 'number', description: 'Max edges returned. Default 100.' },
+    source_id: { type: 'string', description: "Scope to a single source. Defaults to ctx.sourceId; pass '__all__' to force cross-source." },
+    all_sources: { type: 'boolean', description: 'Force cross-source search (equivalent to source_id=__all__).' },
+  },
+  scope: 'read',
+  handler: async (ctx, p) => {
+    const symbol = p.symbol as string;
+    const limit = (p.limit as number) ?? 100;
+    const allSourcesParam = p.all_sources === true;
+    const sourceIdParam = typeof p.source_id === 'string' ? p.source_id : undefined;
+    const allSources = allSourcesParam || sourceIdParam === '__all__';
+    const sourceId = allSources
+      ? undefined
+      : sourceIdParam !== undefined
+        ? sourceIdParam
+        : ctx.sourceId;
+    const edges = await ctx.engine.getCallersOf(symbol, {
+      limit,
+      allSources,
+      sourceId,
+    });
+    return { symbol, count: edges.length, callers: edges };
+  },
+  cliHints: { name: 'code_callers', hidden: true },
+};
+
+const code_callees: Operation = {
+  name: 'code_callees',
+  description: CODE_CALLEES_DESCRIPTION,
+  params: {
+    symbol: { type: 'string', required: true, description: 'Symbol to find callees of (bare or qualified name).' },
+    limit: { type: 'number', description: 'Max edges returned. Default 100.' },
+    source_id: { type: 'string', description: "Scope to a single source. Defaults to ctx.sourceId; pass '__all__' to force cross-source." },
+    all_sources: { type: 'boolean', description: 'Force cross-source search.' },
+  },
+  scope: 'read',
+  handler: async (ctx, p) => {
+    const symbol = p.symbol as string;
+    const limit = (p.limit as number) ?? 100;
+    const allSourcesParam = p.all_sources === true;
+    const sourceIdParam = typeof p.source_id === 'string' ? p.source_id : undefined;
+    const allSources = allSourcesParam || sourceIdParam === '__all__';
+    const sourceId = allSources
+      ? undefined
+      : sourceIdParam !== undefined
+        ? sourceIdParam
+        : ctx.sourceId;
+    const edges = await ctx.engine.getCalleesOf(symbol, {
+      limit,
+      allSources,
+      sourceId,
+    });
+    return { symbol, count: edges.length, callees: edges };
+  },
+  cliHints: { name: 'code_callees', hidden: true },
+};
+
+const code_def: Operation = {
+  name: 'code_def',
+  description: CODE_DEF_DESCRIPTION,
+  params: {
+    symbol: { type: 'string', required: true, description: 'Symbol name (bare token; e.g., parseMarkdown, BrainEngine).' },
+    limit: { type: 'number', description: 'Max definition sites returned. Default 20.' },
+    lang: { type: 'string', description: "Filter by content_chunks.language (e.g. 'typescript', 'python')." },
+  },
+  scope: 'read',
+  handler: async (ctx, p) => {
+    const { findCodeDef } = await import('../commands/code-def.ts');
+    const defs = await findCodeDef(ctx.engine, p.symbol as string, {
+      limit: (p.limit as number) ?? 20,
+      language: (p.lang as string) || undefined,
+    });
+    return { symbol: p.symbol as string, count: defs.length, defs };
+  },
+  cliHints: { name: 'code_def', hidden: true },
+};
+
+const code_refs: Operation = {
+  name: 'code_refs',
+  description: CODE_REFS_DESCRIPTION,
+  params: {
+    symbol: { type: 'string', required: true, description: 'Symbol to find references to.' },
+    limit: { type: 'number', description: 'Max references returned. Default 50.' },
+    lang: { type: 'string', description: "Filter by content_chunks.language." },
+  },
+  scope: 'read',
+  handler: async (ctx, p) => {
+    const { findCodeRefs } = await import('../commands/code-refs.ts');
+    const refs = await findCodeRefs(ctx.engine, p.symbol as string, {
+      limit: (p.limit as number) ?? 50,
+      language: (p.lang as string) || undefined,
+    });
+    return { symbol: p.symbol as string, count: refs.length, refs };
+  },
+  cliHints: { name: 'code_refs', hidden: true },
+};
+
 // --- Exports ---
 
 export const operations: Operation[] = [
@@ -2688,6 +2808,8 @@ export const operations: Operation[] = [
   get_recent_salience, find_anomalies, get_recent_transcripts,
   // v0.31: hot memory (facts table)
   extract_facts, recall, forget_fact,
+  // v0.34: Cathedral III code-intelligence (MCP-exposed; were CLI_ONLY pre-v0.34)
+  code_callers, code_callees, code_def, code_refs,
 ];
 
 export const operationsByName = Object.fromEntries(
