@@ -18,7 +18,7 @@ This release fixes the model ID, adds a tier-based routing surface so power user
 
 **`gbrain models` shows the live routing.** Read mode prints the four tier defaults, the resolved value for each, every per-task override, the alias map, and a source-of-truth column showing exactly where each model came from (`default`, `config: models.tier.reasoning`, `env: GBRAIN_MODEL`). `--json` for machine-readable output.
 
-**`gbrain models doctor` probes each configured model with a 1-token call** and reports reachability with the provider's error message. This is the structural fix for the bug class that produced this release: an invalid model ID surfaces at config time, not at the next agent-run that silently degrades. `gbrain doctor --probe-models` integrates the same probe into the existing health check.
+**`gbrain models doctor` probes each configured model with a 1-token call** and reports reachability with the provider's error message. This is the structural fix for the bug class that produced this release: an invalid model ID surfaces at config time, not at the next agent-run that silently degrades.
 
 **Subagent jobs reject non-Anthropic models at submit time.** The minion queue's `add()` method now refuses `subagent` jobs with `data.model` pointing at a non-Anthropic provider. Three layers of enforcement: submit-time guard, tier-resolution fallback in `resolveModel`, and a `subagent_provider` check in `gbrain doctor`. You cannot accidentally route the Anthropic Messages API tool-loop to OpenAI and watch it fail at runtime.
 

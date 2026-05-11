@@ -48,7 +48,6 @@ Visibility:
 ```bash
 gbrain models                    # print current routing table
 gbrain models doctor             # 1-token probe to each configured model
-gbrain doctor --probe-models     # same probe, integrated
 ```
 
 **Subagent tier exists because the loop is Anthropic-only.** The handler
