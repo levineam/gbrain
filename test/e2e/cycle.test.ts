@@ -97,13 +97,14 @@ describeE2E('E2E: runCycle against real Postgres', () => {
     });
 
     expect(report.schema_version).toBe('1');
-    // Cycle ran all 11 phases (or skipped the ones that don't support dry-run).
+    // Cycle ran all 12 phases (or skipped the ones that don't support dry-run).
     // Phase history:
     //   v0.23   = 8 phases (lint → backlinks → sync → synthesize → extract → patterns → embed → orphans)
     //   v0.26.5 = 9  (added `purge` after orphans)
     //   v0.29   = 10 (added `recompute_emotional_weight` between patterns and embed)
     //   v0.31   = 11 (added `consolidate` between recompute_emotional_weight and embed)
-    expect(report.phases.length).toBe(11);
+    //   v0.34   = 12 (added `resolve_symbol_edges` between extract and patterns)
+    expect(report.phases.length).toBe(12);
 
     // Nothing got written.
     const afterPages = await conn.unsafe(`SELECT count(*)::int AS n FROM pages`);
