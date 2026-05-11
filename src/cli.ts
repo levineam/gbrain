@@ -27,7 +27,7 @@ for (const op of operations) {
 }
 
 // CLI-only commands that bypass the operation layer
-const CLI_ONLY = new Set(['init', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'features', 'autopilot', 'graph-query', 'jobs', 'agent', 'apply-migrations', 'skillpack-check', 'skillpack', 'resolvers', 'integrity', 'repair-jsonb', 'orphans', 'sources', 'mounts', 'dream', 'check-resolvable', 'routing-eval', 'skillify', 'smoke-test', 'providers', 'storage', 'repos', 'code-def', 'code-refs', 'reindex-code', 'reindex-frontmatter', 'code-callers', 'code-callees', 'frontmatter', 'auth', 'friction', 'claw-test', 'book-mirror', 'takes', 'think', 'salience', 'anomalies', 'transcripts', 'remote', 'recall', 'forget']);
+const CLI_ONLY = new Set(['init', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'features', 'autopilot', 'graph-query', 'jobs', 'agent', 'apply-migrations', 'skillpack-check', 'skillpack', 'resolvers', 'integrity', 'repair-jsonb', 'orphans', 'sources', 'mounts', 'dream', 'check-resolvable', 'routing-eval', 'skillify', 'smoke-test', 'providers', 'storage', 'repos', 'code-def', 'code-refs', 'reindex-code', 'reindex-frontmatter', 'code-callers', 'code-callees', 'frontmatter', 'auth', 'friction', 'claw-test', 'book-mirror', 'takes', 'think', 'salience', 'anomalies', 'transcripts', 'models', 'remote', 'recall', 'forget']);
 // CLI-only commands whose handlers print their own --help text. These are
 // excluded from the generic short-circuit so detailed per-command and
 // per-subcommand usage stays reachable.
@@ -37,6 +37,7 @@ const CLI_ONLY_SELF_HELP = new Set([
   'skillpack', 'skillpack-check',
   'integrations', 'friction',
   'frontmatter', 'check-resolvable',
+  'models',
 ]);
 
 async function main() {
@@ -1080,6 +1081,11 @@ async function handleCliOnly(command: string, args: string[]) {
         await runTranscripts(engine, args);
         break;
       }
+      case 'models': {
+        const { runModels } = await import('./commands/models.ts');
+        await runModels(engine, args);
+        break;
+      }
       case 'takes': {
         const { runTakes } = await import('./commands/takes.ts');
         await runTakes(engine, args);
@@ -1222,6 +1228,27 @@ async function handleCliOnly(command: string, args: string[]) {
 // but not the other previously required remembering to mirror the change;
 // the helper makes that structural.
 function buildGatewayConfig(c: GBrainConfig): AIGatewayConfig {
+  // v0.32 (#121 reworked): when ~/.gbrain/config.json declares
+  // openai_api_key / anthropic_api_key, fold them into the gateway env so
+  // recipes that read OPENAI_API_KEY / ANTHROPIC_API_KEY find them. Process
+  // env still wins (it's loaded last) — this is a fallback for daemons /
+  // launchd-spawned subprocesses that don't propagate ~/.zshrc-sourced keys.
+  const envFromConfig: Record<string, string> = {};
+  if (c.openai_api_key) envFromConfig.OPENAI_API_KEY = c.openai_api_key;
+  if (c.anthropic_api_key) envFromConfig.ANTHROPIC_API_KEY = c.anthropic_api_key;
+
+  // v0.32 codex finding #4+#5 fix: thread local-server _BASE_URL env vars
+  // into base_urls so the gateway hits the user's configured port. Without
+  // this, `LLAMA_SERVER_BASE_URL=http://localhost:9000` would let the probe
+  // succeed against :9000 but the actual embed call would still go to the
+  // recipe's base_url_default (localhost:8080). Same fix applies to
+  // OLLAMA_BASE_URL. Caller-provided cfg.provider_base_urls wins.
+  const envBaseUrls: Record<string, string> = {};
+  if (process.env.LLAMA_SERVER_BASE_URL) envBaseUrls['llama-server'] = process.env.LLAMA_SERVER_BASE_URL;
+  if (process.env.OLLAMA_BASE_URL) envBaseUrls['ollama'] = process.env.OLLAMA_BASE_URL;
+  if (process.env.LMSTUDIO_BASE_URL) envBaseUrls['lmstudio'] = process.env.LMSTUDIO_BASE_URL;
+  if (process.env.LITELLM_BASE_URL) envBaseUrls['litellm'] = process.env.LITELLM_BASE_URL;
+
   return {
     embedding_model: c.embedding_model,
     embedding_dimensions: c.embedding_dimensions,
@@ -1229,8 +1256,8 @@ function buildGatewayConfig(c: GBrainConfig): AIGatewayConfig {
     expansion_model: c.expansion_model,
     chat_model: c.chat_model,
     chat_fallback_chain: c.chat_fallback_chain,
-    base_urls: c.provider_base_urls,
-    env: { ...process.env },
+    base_urls: { ...envBaseUrls, ...(c.provider_base_urls ?? {}) }, // config wins over env
+    env: { ...envFromConfig, ...process.env }, // process.env wins
   };
 }
 
@@ -1307,6 +1334,12 @@ async function connectEngine(opts?: { probeOnly?: boolean }): Promise<BrainEngin
       // clear per startup is microseconds, no hot path.
       configureGateway(buildGatewayConfig(merged));
     }
+    // v0.31.12: re-resolve gateway defaults through resolveModel so
+    // `models.tier.*` and `models.default` overrides apply to expansion +
+    // chat. Per Codex F3 — configureGateway is sync; this is the async
+    // re-stamp seam after engine.connect() makes config reads possible.
+    const { reconfigureGatewayWithEngine } = await import('./core/ai/gateway.ts');
+    await reconfigureGatewayWithEngine(engine);
   } catch {
     // Non-fatal. Pre-v39 brains may not have a usable config table yet.
   }
