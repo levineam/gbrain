@@ -4,6 +4,7 @@ import { LATEST_VERSION, getIdleBlockers } from '../core/migrate.ts';
 import { checkResolvable } from '../core/check-resolvable.ts';
 import { autoFixDryViolations, type AutoFixReport, type FixOutcome } from '../core/dry-fix.ts';
 import { autoDetectSkillsDirReadOnly } from '../core/repo-root.ts';
+import { loadOrDeriveManifest } from '../core/skill-manifest.ts';
 import { loadCompletedMigrations } from '../core/preferences.ts';
 import { compareVersions } from './migrations/index.ts';
 import { createProgress, startHeartbeat, type ProgressReporter } from '../core/progress.ts';
@@ -2061,14 +2062,12 @@ function printAutoFixReport(report: AutoFixReport, dryRun: boolean, jsonOutput: 
 
 /** Quick skill conformance check — frontmatter + required sections */
 function checkSkillConformance(skillsDir: string): Check {
-  const manifestPath = join(skillsDir, 'manifest.json');
-  if (!existsSync(manifestPath)) {
-    return { name: 'skill_conformance', status: 'warn', message: 'manifest.json not found' };
-  }
-
   try {
-    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+    const manifest = loadOrDeriveManifest(skillsDir);
     const skills = manifest.skills || [];
+    if (skills.length === 0) {
+      return { name: 'skill_conformance', status: 'warn', message: 'No skills found in manifest or skills directory' };
+    }
     let passing = 0;
     const failing: string[] = [];
 
@@ -2088,7 +2087,8 @@ function checkSkillConformance(skillsDir: string): Check {
     }
 
     if (failing.length === 0) {
-      return { name: 'skill_conformance', status: 'ok', message: `${passing}/${skills.length} skills pass` };
+      const derived = manifest.derived ? ' (derived manifest)' : '';
+      return { name: 'skill_conformance', status: 'ok', message: `${passing}/${skills.length} skills pass${derived}` };
     }
     return {
       name: 'skill_conformance',

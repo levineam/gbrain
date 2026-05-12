@@ -83,6 +83,43 @@ describe('doctor command', () => {
     expect(source).toContain('GBRAIN_DATABASE_URL');
   });
 
+  test('doctor derives skill conformance manifest for OpenClaw workspace layouts', async () => {
+    const { mkdtempSync, rmSync } = await import('fs');
+    const { join } = await import('path');
+    const { tmpdir } = await import('os');
+
+    const tmpHome = mkdtempSync(join(tmpdir(), 'gbrain-doctor-openclaw-'));
+    const fixture = new URL('./fixtures/openclaw-reference-minimal/', import.meta.url).pathname;
+    try {
+      const env = {
+        ...process.env,
+        HOME: tmpHome,
+        OPENCLAW_WORKSPACE: fixture,
+      } as Record<string, string | undefined>;
+      delete env.DATABASE_URL;
+      delete env.GBRAIN_DATABASE_URL;
+      delete env.GBRAIN_SKILLS_DIR;
+
+      const result = Bun.spawnSync({
+        cmd: ['bun', 'run', 'src/cli.ts', 'doctor', '--fast', '--json'],
+        cwd: import.meta.dir + '/..',
+        env: env as Record<string, string>,
+      });
+
+      const stdout = new TextDecoder().decode(result.stdout);
+      expect(result.exitCode).toBe(0);
+      const checks = JSON.parse(stdout).checks as Array<{ name: string; status: string; message: string }>;
+      const conformance = checks.find(c => c.name === 'skill_conformance');
+      expect(conformance).toBeDefined();
+      expect(conformance!.status).toBe('ok');
+      expect(conformance!.message).toContain('4/4 skills pass');
+      expect(conformance!.message).toContain('derived manifest');
+      expect(conformance!.message).not.toContain('manifest.json not found');
+    } finally {
+      rmSync(tmpHome, { recursive: true, force: true });
+    }
+  });
+
   // v0.12.2 reliability wave — doctor detects JSONB double-encode + truncated
   // bodies and points users at the standalone `gbrain repair-jsonb` command.
   // Detection only; repair lives in src/commands/repair-jsonb.ts.
