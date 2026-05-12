@@ -139,6 +139,33 @@ describe('doctor command', () => {
     expect(source).toMatch(/table:\s*'files'.*col:\s*'metadata'/);
   });
 
+  test('pgvector check skips on PGLite with an ok status', async () => {
+    const source = await Bun.file(new URL('../src/commands/doctor.ts', import.meta.url)).text();
+    const block = source.slice(
+      source.indexOf('// 4. pgvector extension'),
+      source.indexOf('// 4b. PgBouncer'),
+    );
+    expect(block.length).toBeGreaterThan(0);
+    expect(block).toMatch(/engine\.kind\s*===\s*'pglite'/);
+    expect(block).toMatch(/name:\s*'pgvector'[\s\S]*?status:\s*'ok'/);
+    expect(block).toContain('vector extension is bundled with the embedded engine');
+    expect(block).toContain('CREATE EXTENSION vector');
+  });
+
+  test('jsonb_integrity check skips on PGLite but keeps the Postgres repair probe', async () => {
+    const source = await Bun.file(new URL('../src/commands/doctor.ts', import.meta.url)).text();
+    const block = source.slice(
+      source.indexOf("// 10. JSONB integrity"),
+      source.indexOf('// 10b. Takes weight grid integrity'),
+    );
+    expect(block.length).toBeGreaterThan(0);
+    expect(block).toMatch(/engine\.kind\s*===\s*'pglite'/);
+    expect(block).toMatch(/name:\s*'jsonb_integrity'[\s\S]*?status:\s*'ok'/);
+    expect(block).toContain('Postgres JSONB double-encode probe is not applicable');
+    expect(block).toContain('jsonb_typeof');
+    expect(block).toContain('gbrain repair-jsonb');
+  });
+
   // v0.31.2 — facts_extraction_health check added in PR1 commit 12.
   // Reads ingest_log rows with source_type='facts:absorb' (written by
   // writeFactsAbsorbLog from src/core/facts/absorb-log.ts), groups by
