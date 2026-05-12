@@ -1,4 +1,5 @@
 import { describe, test, expect } from 'bun:test';
+import { fileURLToPath } from 'url';
 
 describe('doctor command', () => {
   test('doctor module exports runDoctor', async () => {
@@ -83,6 +84,43 @@ describe('doctor command', () => {
     expect(source).toContain('GBRAIN_DATABASE_URL');
   });
 
+  test('doctor derives skill conformance manifest for OpenClaw workspace layouts', async () => {
+    const { mkdtempSync, rmSync } = await import('fs');
+    const { join } = await import('path');
+    const { tmpdir } = await import('os');
+
+    const tmpHome = mkdtempSync(join(tmpdir(), 'gbrain-doctor-openclaw-'));
+    const fixture = fileURLToPath(new URL('./fixtures/openclaw-reference-minimal/', import.meta.url));
+    try {
+      const env = {
+        ...process.env,
+        HOME: tmpHome,
+        OPENCLAW_WORKSPACE: fixture,
+      } as Record<string, string | undefined>;
+      delete env.DATABASE_URL;
+      delete env.GBRAIN_DATABASE_URL;
+      delete env.GBRAIN_SKILLS_DIR;
+
+      const result = Bun.spawnSync({
+        cmd: ['bun', 'run', 'src/cli.ts', 'doctor', '--fast', '--json'],
+        cwd: import.meta.dir + '/..',
+        env: env as Record<string, string>,
+      });
+
+      const stdout = new TextDecoder().decode(result.stdout);
+      expect(result.exitCode).toBe(0);
+      const checks = JSON.parse(stdout).checks as Array<{ name: string; status: string; message: string }>;
+      const conformance = checks.find(c => c.name === 'skill_conformance');
+      expect(conformance).toBeDefined();
+      expect(conformance!.status).toBe('ok');
+      expect(conformance!.message).toContain('4/4 skills pass');
+      expect(conformance!.message).toContain('derived manifest');
+      expect(conformance!.message).not.toContain('manifest.json not found');
+    } finally {
+      rmSync(tmpHome, { recursive: true, force: true });
+    }
+  });
+
   // v0.12.2 reliability wave — doctor detects JSONB double-encode + truncated
   // bodies and points users at the standalone `gbrain repair-jsonb` command.
   // Detection only; repair lives in src/commands/repair-jsonb.ts.
@@ -99,6 +137,33 @@ describe('doctor command', () => {
     expect(source).toMatch(/table:\s*'raw_data'.*col:\s*'data'/);
     expect(source).toMatch(/table:\s*'ingest_log'.*col:\s*'pages_updated'/);
     expect(source).toMatch(/table:\s*'files'.*col:\s*'metadata'/);
+  });
+
+  test('pgvector check skips on PGLite with an ok status', async () => {
+    const source = await Bun.file(new URL('../src/commands/doctor.ts', import.meta.url)).text();
+    const block = source.slice(
+      source.indexOf('// 4. pgvector extension'),
+      source.indexOf('// 4b. PgBouncer'),
+    );
+    expect(block.length).toBeGreaterThan(0);
+    expect(block).toMatch(/engine\.kind\s*===\s*'pglite'/);
+    expect(block).toMatch(/name:\s*'pgvector'[\s\S]*?status:\s*'ok'/);
+    expect(block).toContain('vector extension is bundled with the embedded engine');
+    expect(block).toContain('CREATE EXTENSION vector');
+  });
+
+  test('jsonb_integrity check skips on PGLite but keeps the Postgres repair probe', async () => {
+    const source = await Bun.file(new URL('../src/commands/doctor.ts', import.meta.url)).text();
+    const block = source.slice(
+      source.indexOf("// 10. JSONB integrity"),
+      source.indexOf('// 10b. Takes weight grid integrity'),
+    );
+    expect(block.length).toBeGreaterThan(0);
+    expect(block).toMatch(/engine\.kind\s*===\s*'pglite'/);
+    expect(block).toMatch(/name:\s*'jsonb_integrity'[\s\S]*?status:\s*'ok'/);
+    expect(block).toContain('Postgres JSONB double-encode probe is not applicable');
+    expect(block).toContain('jsonb_typeof');
+    expect(block).toContain('gbrain repair-jsonb');
   });
 
   // v0.31.2 — facts_extraction_health check added in PR1 commit 12.
