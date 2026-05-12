@@ -1,4 +1,5 @@
 import { describe, test, expect } from 'bun:test';
+import { fileURLToPath } from 'url';
 
 describe('doctor command', () => {
   test('doctor module exports runDoctor', async () => {
@@ -89,7 +90,7 @@ describe('doctor command', () => {
     const { tmpdir } = await import('os');
 
     const tmpHome = mkdtempSync(join(tmpdir(), 'gbrain-doctor-openclaw-'));
-    const fixture = new URL('./fixtures/openclaw-reference-minimal/', import.meta.url).pathname;
+    const fixture = fileURLToPath(new URL('./fixtures/openclaw-reference-minimal/', import.meta.url));
     try {
       const env = {
         ...process.env,
