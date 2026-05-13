@@ -23,7 +23,15 @@ start here.
 2. Install: `bun install`
 3. Init the brain: `gbrain init` (defaults to PGLite, zero-config). For 1000+ files or
    multi-machine sync, init suggests Postgres + pgvector via Supabase.
-4. Read [`./INSTALL_FOR_AGENTS.md`](./INSTALL_FOR_AGENTS.md) for the full 9-step flow
+4. **STOP — ask the user about search mode.** `gbrain init` auto-applied a
+   default but printed a 9-cell cost matrix (mode × downstream model)
+   preceded by `[AGENT]` markers. You MUST relay the matrix to the operator
+   and confirm their choice before continuing. Cost spread between corners
+   is 25x — silent acceptance is the wrong default. See
+   [`./INSTALL_FOR_AGENTS.md`](./INSTALL_FOR_AGENTS.md) Step 3.5 for the
+   exact ask-the-user protocol. Same banner fires on `gbrain post-upgrade`
+   for existing users (search modes were added in v0.32.3).
+5. Read [`./INSTALL_FOR_AGENTS.md`](./INSTALL_FOR_AGENTS.md) for the full 9-step flow
    (API keys, identity, cron, verification).
 
 ## Read this order
@@ -814,6 +822,100 @@ permission to run them — see the "run without asking" rule above.
 
 Never leave `gbrain-test-pg` running. If you find a stale one from a previous run,
 stop and remove it before starting a new one.
+
+## Search Mode (v0.32.3)
+
+GBrain ships three named search modes that bundle the search-lite knobs from
+PR #897 into a single config key. Pick one at install time; the rest of the
+project resolves through `src/core/search/mode.ts`.
+
+| Knob                          | `conservative` | `balanced` | `tokenmax`     |
+|-------------------------------|----------------|------------|----------------|
+| `cache.enabled`               | true           | true       | true           |
+| `cache.similarity_threshold`  | 0.92           | 0.92       | 0.92           |
+| `cache.ttl_seconds`           | 3600           | 3600       | 3600           |
+| `intentWeighting`             | true           | true       | true           |
+| `tokenBudget`                 | **4000**       | **12000**  | **off**        |
+| `expansion` (LLM multi-query) | false          | false      | **true**       |
+| `searchLimit` default         | 10             | 25         | 50             |
+
+**Cost anchors (downstream agent input cost — gbrain itself is rounding error).**
+The corner-to-corner spread is 25x once you pair mode with downstream model.
+Chunks ~400 tokens avg. Per-query cost @ 10K queries/month (typical
+single-user volume), full search payload, no cache savings:
+
+| Mode \ Downstream | Haiku 4.5 (\$1/M) | Sonnet 4.6 (\$3/M) | Opus 4.7 (\$5/M) |
+|---|---|---|---|
+| conservative (~4K) | **\$40/mo** | \$120/mo | \$200/mo |
+| balanced (~10K) | \$100/mo | \$300/mo | \$500/mo |
+| tokenmax (~20K) | \$200/mo | \$600/mo | **\$1,000/mo** |
+
+Scales linearly: multiply by 10 for 100K/mo (heavy power user / multi-user
+fleet); divide by 10 for 1K/mo (light usage). Natural pairings span ~4x.
+Mismatches (tokenmax+Haiku, conservative+Opus) waste capacity differently
+— too-big payload overwhelms a cheap model; too-small payload starves an
+expensive one.
+
+tokenmax adds ~\$1.50 per 1K queries in Haiku expansion calls on top of
+the matrix (\$15/mo @ 10K). Cache hits cut all numbers ~50%. **The cost
+picker copy in `gbrain init` carries the same matrix verbatim** — update
+both when refreshing.
+
+**Per-query math vs real-world spend.** The matrix above is what an
+isolated benchmark would measure. Real agent loops with disciplined
+Anthropic prompt caching see 50-80% discount on top (cache hits skip
+downstream entirely). The realistic-scale anchor in
+`docs/eval/SEARCH_MODE_METHODOLOGY.md` walks the natural pairings at
+single-power-user volume (~860 turns/mo): tokenmax+Opus ~\$700/mo,
+balanced+Sonnet ~\$430/mo, conservative+Haiku ~\$170/mo. Setups WITHOUT
+cache-aware prompt layout (frequent prefix churn) see the per-query
+matrix dominate — mode + model choice matters more there.
+
+**Resolution chain** (matches the v0.31.12 model-tier pattern at
+`src/core/model-config.ts:resolveModel`):
+
+    per-call SearchOpts → per-key config (search.cache.enabled, …) →
+      MODE_BUNDLES[search.mode] → MODE_BUNDLES.balanced (fallback)
+
+Mode resolution lives in **bare `hybridSearch`** (NOT just the cached wrapper)
+per `[CDX-5+6]` in `~/.claude/plans/lets-take-a-look-validated-parrot.md` — so
+`gbrain eval replay` and `gbrain eval longmemeval` test the same mode-affected
+behavior as the production `query` op.
+
+**Cache-key contamination hotfix `[CDX-4]`:** migration v56 added a
+`knobs_hash` column to `query_cache`. The lookup filter is now
+`WHERE source_id = $ AND knobs_hash = $ AND embedding similarity < $` so a
+tokenmax write (expansion=on, limit=50) can't be served to a conservative
+read.
+
+**Three CLI surfaces:**
+
+    gbrain search modes              # what is running, with per-knob attribution
+    gbrain search modes --reset      # clear search.* overrides (mode bundle wins)
+    gbrain search stats [--days N]   # cache hit rate, intent mix, budget drops
+    gbrain search tune [--apply]     # data-driven recommendations
+
+The install picker fires inside `gbrain init` AFTER `engine.initSchema()`
+(non-TTY auto-selects). The upgrade banner fires once via `runPostUpgrade`
+in `src/commands/upgrade.ts`, gated by `search.mode_upgrade_notice_shown`.
+
+## Eval discipline (v0.32.3)
+
+Every metric printed by any `gbrain eval *` or `gbrain search stats` command
+resolves through `src/core/eval/metric-glossary.ts` so industry terms
+(`P@k`, `nDCG@k`, `MRR`, `Jaccard@k`) carry a plain-English line in human
+output and a `_meta.metric_glossary` block in JSON output (one block per
+response per `[CDX-25]`, NOT sibling `_gloss` fields).
+
+The full methodology — datasets, sample selection, pre-registered
+expectations, threats to validity, paired-bootstrap + Bonferroni p-value
+discipline `[CDX-14]` — lives in `docs/eval/SEARCH_MODE_METHODOLOGY.md`.
+Auto-regenerated `docs/eval/METRIC_GLOSSARY.md` is CI-guarded against
+drift (`scripts/check-eval-glossary-fresh.sh`).
+
+Per-run records land at `<repo>/.gbrain-evals/eval-results.jsonl` per
+`[CDX-23]`. The user's personal `~/.gbrain` brain is NEVER touched —
+audit trail lives in the source repo's git history.
 
 ## Skills
 
@@ -1623,6 +1725,63 @@ Read `~/gbrain/docs/GBRAIN_RECOMMENDED_SCHEMA.md` and set up the MECE directory
 structure (people/, companies/, concepts/, etc.) inside the user's brain repo,
 NOT inside ~/gbrain.
 
+## Step 3.5: Confirm search mode with the user (DO NOT SKIP)
+
+`gbrain init` auto-applied a default search mode (`tokenmax` unless your subagent
+tier is Haiku-class or no OpenAI key is configured). The init output included the
+cost matrix below preceded by `[AGENT]` markers. You must NOT silently accept the
+default. Stop and ask the operator.
+
+**Present this matrix verbatim:**
+
+```
+Per-query cost @ 10K queries/mo (typical single-user volume):
+
+                  Haiku 4.5     Sonnet 4.6    Opus 4.7
+                  ($1/M)        ($3/M)        ($5/M)
+  conservative    $40/mo        $120/mo       $200/mo
+  balanced        $100/mo       $300/mo       $500/mo
+  tokenmax        $200/mo       $600/mo       $1,000/mo
+
+(scales linearly: ×10 for 100K/mo, ÷10 for 1K. 25x corner-to-corner spread.
+ Natural diagonal pairings — cheap/cheap → frontier/frontier — span ~4x.)
+```
+
+**Ask the operator (paraphrase if needed):**
+
+> Your gbrain just installed with search mode `<auto-applied default>`. This is
+> a one-time setup decision that controls retrieval payload size. Which mode
+> do you want?
+>
+>   1) conservative — tight 4K budget, no LLM expansion, 10 chunks max.
+>      Best for Haiku subagents, cost-sensitive setups, high-volume loops.
+>
+>   2) balanced — 12K budget, no expansion, 25 chunks. Sonnet-tier sweet spot.
+>
+>   3) tokenmax (recommended default — preserves v0.31.x retrieval shape) —
+>      no budget, LLM expansion ON, 50 chunks. Best for Opus/frontier models.
+>
+> Cost depends on BOTH the mode AND the downstream model you run. See the
+> matrix above for the 9-cell breakdown.
+
+If the operator picks a non-default mode, run:
+```bash
+gbrain config set search.mode <mode>
+```
+
+If they pick tokenmax AND want to preserve the literal v0.31.x default
+(limit=20 instead of tokenmax's 50), also run:
+```bash
+gbrain config set search.searchLimit 20
+```
+
+Verify the choice with `gbrain search modes` before continuing.
+
+**Why this matters:** the cost spread between corners of the matrix is 25x.
+An agent that silently accepts the default and starts running queries against
+a user who didn't expect tokenmax-class context loads can rack up surprise
+spend. Confirm before continuing.
+
 ## Step 4: Import and Index
 
 ```bash
@@ -1721,6 +1880,15 @@ Then read `~/gbrain/skills/migrations/v<NEW_VERSION>.md` (and any intermediate
 versions you skipped) and run any backfill or verification steps it lists. Skipping
 this is how features ship in the binary but stay dormant in the user's brain.
 
+**v0.32.3 search modes (one-time upgrade prompt):** if the user's brain was
+created before v0.32.3, `gbrain post-upgrade` prints a banner including the
+9-cell cost matrix (mode × downstream model) preceded by `[AGENT]` markers.
+**Do NOT silently move past the banner.** Present the matrix to the operator
+verbatim, ask which mode they want (recommended default: `tokenmax` to preserve
+v0.31.x retrieval shape), then run `gbrain config set search.mode <mode>`. See
+Step 3.5 above for the full ask-the-user protocol — the upgrade path uses the
+same matrix and same default.
+
 For v0.12.0+ specifically: if your brain was created before v0.12.0, run
 `gbrain extract links --source db && gbrain extract timeline --source db` to
 backfill the new graph layer (see Step 4.5 above).
@@ -1762,6 +1930,8 @@ This is the dispatcher. Skills are the implementation. **Read the skill file bef
 | "Research", "track", "extract from email", "investor updates", "donations" | `skills/data-research/SKILL.md` |
 | Share a brain page as a link | `skills/publish/SKILL.md` |
 | "validate frontmatter", "check frontmatter", "fix frontmatter", "frontmatter audit", "brain lint" | `skills/frontmatter-guard/SKILL.md` |
+| "what search mode", "is my cache hot", "tune my retrieval", "compare search modes", "clear search overrides" | `gbrain search modes/stats/tune` directly. See `skills/conventions/search-modes.md` |
+| "eval results", "search benchmark", "haters-immune methodology", "regression check on retrieval" | `gbrain eval run-all` / `gbrain eval compare`. See `docs/eval/SEARCH_MODE_METHODOLOGY.md` |
 
 ## Content & media ingestion
 
@@ -1919,9 +2089,31 @@ the full doc map, use `llms.txt` at the same URL root.
 ```bash
 git clone https://github.com/garrytan/gbrain.git && cd gbrain && bun install && bun link
 gbrain init                     # local brain, ready in 2 seconds
+                                # picks a search mode (conservative / balanced / tokenmax)
 gbrain import ~/notes/          # index your markdown
 gbrain query "what themes show up across my notes?"
+gbrain search modes             # see the active search mode + per-knob attribution
+gbrain search stats             # cache hit rate + intent mix after some real usage
 ```
+
+**v0.32.3 — named search modes.** `gbrain init` asks once which mode fits
+your workload. The cost spread depends on BOTH the mode AND your downstream
+model — 25x corner-to-corner. Per-query cost @ 10K queries/month (typical
+single-user volume; multiply by 10 for heavy / multi-user fleets):
+
+| Mode \ Downstream | Haiku 4.5 (\$1/M) | Sonnet 4.6 (\$3/M) | Opus 4.7 (\$5/M) |
+|---|---|---|---|
+| `conservative` (~4K) | **\$40/mo** | \$120/mo | \$200/mo |
+| `balanced` (~10K) | \$100/mo | \$300/mo | \$500/mo |
+| `tokenmax` (~20K) | \$200/mo | \$600/mo | **\$1,000/mo** |
+
+Natural pairings (corner-diagonal) span ~4x at realistic single-user
+volume. Auto-suggests based on your configured `models.tier.subagent`.
+Non-TTY installs auto-pick `balanced` and print a hint pointing at
+`gbrain config set search.mode <m>`. After some real usage, run
+`gbrain search stats` for observability and `gbrain search tune` for
+data-driven recommendations. Methodology + eval results live at
+[docs/eval/SEARCH_MODE_METHODOLOGY.md](docs/eval/SEARCH_MODE_METHODOLOGY.md).
 
 **Do NOT use `bun install -g github:garrytan/gbrain`.** Bun blocks the top-level
 postinstall hook on global installs, so schema migrations never run and the CLI
