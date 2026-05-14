@@ -203,3 +203,36 @@ describe("Skill example-name validator (D13)", () => {
     });
   }
 });
+
+
+describe("RESOLVER.md jarvOS/OpenClaw authority boundary", () => {
+  const resolverContent = existsSync(RESOLVER_PATH)
+    ? readFileSync(RESOLVER_PATH, "utf-8")
+    : "";
+
+  test("declares GBrain as the first routing authority for brain-native jarvOS/OpenClaw work", () => {
+    expect(resolverContent).toContain("first routing authority");
+    expect(resolverContent).toContain("brain-native jarvOS and OpenClaw work");
+    expect(resolverContent).toContain("Local OpenClaw routing is an exception map only");
+  });
+
+  test("preserves local-only OpenClaw exception categories", () => {
+    for (const phrase of [
+      "external/public sends",
+      "privacy/safety enforcement",
+      "Paperclip execution",
+      "cron/runtime policy",
+      "Discord behavior",
+      "host config/auth/restarts",
+    ]) {
+      expect(resolverContent).toContain(phrase);
+    }
+  });
+
+  test("documents the durable-note journal backlink contract", () => {
+    expect(resolverContent).toContain("exactly one `[[Note Title]]` link under `## 📝 Notes`");
+    expect(resolverContent).toContain("deprecated `## 🗂️ Notes Created`");
+    expect(resolverContent).toContain("Child Education - Daily Capsule - 2026-05-14");
+    expect(resolverContent).toContain("journal-note-audit.js --fix");
+  });
+});

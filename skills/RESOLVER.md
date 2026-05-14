@@ -2,6 +2,22 @@
 
 This is the dispatcher. Skills are the implementation. **Read the skill file before acting.** If two skills could match, read both. They are designed to chain (e.g., ingest then enrich for each entity).
 
+
+## jarvOS / OpenClaw routing authority
+
+GBrain is the **first routing authority** for brain-native jarvOS and OpenClaw work. If the intent touches brain reads/writes, notes, ontology, filing, citations, ingestion, enrichment, skill conformance, or durable knowledge contracts, start here and then read the matched GBrain skill.
+
+Local OpenClaw routing is an exception map only. Keep these operations local and do not route them through GBrain: external/public sends and approval gates, privacy/safety enforcement, Paperclip execution and issue mutation, cron/runtime policy, Discord behavior, host config/auth/restarts, and other OpenClaw-only runtime operations. After a local gate finishes, return here for any brain-native sub-lane.
+
+### Durable note provenance contract
+
+For any durable note create or material update, the canonical brain contract is:
+
+- Today's journal contains exactly one `[[Note Title]]` link under `## 📝 Notes`.
+- New provenance links are never written to deprecated `## 🗂️ Notes Created`.
+- The concrete regression to guard against is a note like `[[Child Education - Daily Capsule - 2026-05-14]]` being created or updated without that journal link.
+- OpenClaw remains the local enforcement path: run its note-to-journal helper/audit repair (`link-to-journal.js`; `journal-note-audit.js --fix`) when a local vault write may have missed the link.
+
 ## Always-on (every message)
 
 | Trigger | Skill |
